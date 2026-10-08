@@ -1,0 +1,37 @@
+# Containers dir
+envs
+
+# References die
+references
+
+# PON pipeline
+*pon*
+
+# patch files
+*patch*
+
+# Logs
+Log
+
+# Notes
+Notes.md
+
+# container url generator
+wave
+
+#hpc lsf files
+hpc_make_index.lsf
+
+# docker files
+Dockerfile*
+
+# Log files
+Logs
+
+# tmp files
+*tmp*
+
+# systems file
+.DS_Store
+.vscode
+.nextflow
