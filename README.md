@@ -809,14 +809,15 @@ write_manifest:         true
 preflight_references:   true            # check references before any job is submitted
 
 # ---------------- Library ----------------
-dedup_mode:             markdup         # demonstration: no UMIs
+dedup_mode:             markdup         # umi_markdup| umi_consensus | markdup (demonstration: no UMIs)
 umi_read_structure:     null
 # dedup_mode:           umi_markdup     # own data: inline UMIs
-# umi_read_structure:   '3M2S+T'
+# umi_read_structure:   '3M2S+T' # per-mate: 3bp UMI, 2bp linker skip, rest template
+umi_read_structure_r2:  null     # R2 structure if it differs from R1 (e.g. '+T' for UMI on R1 only); null = same as R1
 bqsr:                   false
 skip_trimming:          false
-make_cram:              false
-germline_on_normals:    false           # true = germline report for each matched normal (needs consent)
+make_cram:              false     # BAM->CRAM conversion (storage only). false = keep BAM.
+germline_on_normals:    false     # true = germline report for each matched normal (needs consent)
 
 # ---------------- Input / output ----------------
 container_dir:          /home/<user>/genomics_pipeline/envs
@@ -828,6 +829,7 @@ rna_samplesheet:        null
 bind_paths:             [/home/<user>, /scratch/<user>]
 
 # ---------------- Reference genome ----------------
+# (GDC GRCh38.d1.vd1)
 ref_index_dir:          ${projectDir}/../references/GRCh38
 ref_fasta:              ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.fa
 ref_fai:                ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.fa.fai
@@ -842,6 +844,8 @@ scatter_intervals:      ${projectDir}/../references/Validation_Scatter_Intervals
 germline_scatter_intervals: ${projectDir}/../references/Validation_Germline_Scatter_150_V6_pad100
 
 # ---------------- Capture: own data = SureSelect V7 (S31285117) ----------------
+# (reconciled to d1.vd1; need .tbi)
+
 # interval_bed:           ${projectDir}/../references/BostonGeneBed/S31285117_Regions.bed
 # call_regions_gz:        ${projectDir}/../references/BostonGeneBed/S31285117_Regions.pad100.bed.gz
 # bait_interval_list:     ${projectDir}/../references/BostonGeneBed/MergedProbes.interval_list
@@ -850,6 +854,7 @@ germline_scatter_intervals: ${projectDir}/../references/Validation_Germline_Scat
 # germline_scatter_intervals: ${projectDir}/../references/Germline_Scatter_150_pad100
 
 # ---------------- Known sites (BQSR, germline) ----------------
+# (reconciled to d1.vd1; need .tbi)
 dbsnp:                  ${projectDir}/../references/DBs_SNP_Indels/Homo_sapiens_assembly38.dbsnp138.d1vd1.vcf.gz
 mills:                  ${projectDir}/../references/DBs_SNP_Indels/Mills_and_1000G_gold_standard.indels.hg38.d1vd1.vcf.gz
 known_indels:           ${projectDir}/../references/DBs_SNP_Indels/Homo_sapiens_assembly38.known_indels.d1vd1.vcf.gz
@@ -858,6 +863,7 @@ known_indels:           ${projectDir}/../references/DBs_SNP_Indels/Homo_sapiens_
 somalier_sites:         ${projectDir}/../references/DBs_Somatic_VCFs/somalier_hg38.vcf.gz
 germline_resource:      ${projectDir}/../references/DBs_Somatic_VCFs/af-only-gnomad.d1vd1.vcf.gz
 pileup_variants:        ${projectDir}/../references/DBs_Somatic_VCFs/small_exac_common_3.d1vd1.vcf.gz
+# Choose either 1000G PON or your custom PON for RCC
 panel_of_normals:       ${projectDir}/../references/DBs_Somatic_VCFs/1000g_pon.d1vd1.vcf.gz
 # panel_of_normals:     ${projectDir}/../references/DBs_Germline_VCFs/Kidney_Can_PON.vcf.gz   # own data: in-house PON
 orientation_bias:       true
@@ -880,8 +886,11 @@ annotsv_dir:            ${projectDir}/../references/DBs_AnnotSV
 
 # ---------------- Germline ----------------
 germline_caller:        haplotypecaller   # haplotypecaller | deepvariant
-germline_filter:        nv                # nv (any sample number) | vqsr (>= 30 samples)
+germline_filter:        nv                # nv (any sample number NVScoreVariants) | vqsr (>= 30 samples)
+vqsr_min_samples:       30  # minimum samples before VQSR is allowed (else use 'nv')
 run_gcnv:               false             # true only with >= 30 normals of one kit
+gcnv_min_samples:       30
+ermline_ba1_af:         0.05
 verifybamid_db:         null
 hapmap:                 ${projectDir}/../references/DBs_Germline_VCFs/hapmap_3.3.d1vd1.vcf.gz
 omni:                   ${projectDir}/../references/DBs_Germline_VCFs/1000g_omni2.5.d1vd1.vcf.gz
@@ -929,7 +938,7 @@ Launch from a login node or a long-running interactive job; Nextflow submits eve
 
 ```bash
 cd $HOME/genomics_pipeline
-nextflow run nextflow/main.nf -c nextflow/nextflow.config \
+nextflow run ${HOME}/genomics_pipeline/nextflow/main.nf -c ${HOME}/genomics_pipeline/nextflow/nextflow.config \
   -params-file params_demo.yaml -profile production -resume
 ```
 
