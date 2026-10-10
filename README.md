@@ -1039,8 +1039,8 @@ Helper scripts: `make_figures.py` (Figures 2-5, Tables 1-2), `eval_germline.sh`,
 
 ### 10. Benchmark truth sets
 
-# Set once
-
+#### Set once
+```bash
 PIPE=${HOME}/genomics_pipeline
 DATA=${HOME}/test_data
 R=$PIPE/references
@@ -1052,7 +1052,7 @@ SX="singularity exec -B $PIPE -B $DATA"
 BCF="$SX $E/bwa_samtools_fastp_fgbio_bcftools.sif bcftools"
 RTG="$SX $E/rtg_tools.sif rtg"
 BEDTOOLS="$SX $E/gatk.sif bedtools"
-
+```
 
 #### 10.1 RTG reference for vcfeval [Generate]
 
@@ -1086,15 +1086,17 @@ wget -c -P $R/truth_data $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz $GB/HG002
 ```
 
 
-# =================  Benchmark your calls =================
-# Set once
+#### =================  Benchmark your calls =================
 
+```bash
 OUT_S=$DATA/Result_valid_8_Oct_26_som          # <<< outdir of the SEQC2 somatic run
 OUT_G=$DATA/Result_valid_8_Oct_26_germ                 # <<< outdir of the HG002 germline run
 
 HEADER="callset\ttype\ttruth\tTP\tFP\tFN\trecall\tprecision\tF1"
+```
+#### ---------- Counts and metrics per variant type from one vcfeval folder ----------
 
-# ---------- Counts and metrics per variant type from one vcfeval folder ----------
+```bash
 count_metrics () {               # usage: count_metrics <vcfeval_dir> <label>
   for t in snps indels; do
     TPb=$($BCF view -H -v $t $1/tp-baseline.vcf.gz | wc -l)   # truth variants found
@@ -1106,23 +1108,27 @@ count_metrics () {               # usage: count_metrics <vcfeval_dir> <label>
       printf "%s\t%s\t%d\t%d\t%d\t%d\t%.4f\t%.4f\t%.4f\n", l, t, a+n, a, f, n, r, p, F }'
   done
 }
+```
 
-# ======================================================================
-#  A. SOMATIC - SEQC2 HCC1395 / HCC1395BL (valid1)
-# ======================================================================
+####  A. SOMATIC - SEQC2 HCC1395 / HCC1395BL (valid1)
+
+```bash
 mkdir -p $OUT_S/benchmark && cd $OUT_S/benchmark
 EVAL=$R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
 awk '{s+=$3-$2} END{print "somatic evaluation region: " s/1e6 " Mb"}' $EVAL
+```
+#### ---------- A1. Truth: HighConf + MedConf, FILTER = PASS, no samples, split alleles ----------
 
-# ---------- A1. Truth: HighConf + MedConf, FILTER = PASS, no samples, split alleles ----------
-
+```bash
 $BCF view -G $T/SEQC2_Truth_v1.2.1.vcf.gz \
   | awk 'BEGIN{OFS="\t"} /^#/{print; next} {$7="PASS"; print}' \
   | $BCF norm -m -any -f $REF -Oz -o truth_somatic.vcf.gz -
 $BCF index -f -t truth_somatic.vcf.gz
+```
 
-#---------- A2. Superset and its non-truth labels (FILTER column) ----------
+####---------- A2. Superset and its non-truth labels (FILTER column) ----------
 
+```bash
 $BCF concat -a $T/sSNV.MSDUKT.superSet.v1.2.vcf.gz $T/sINDEL.MDKT.superSet.v1.2.vcf.gz \
   | $BCF sort | $BCF norm -m -any -f $REF -Oz -o superset.vcf.gz -
 $BCF index -f -t superset.vcf.gz
@@ -1132,13 +1138,16 @@ $BCF query -f '%FILTER\n' superset.vcf.gz | tr ';' '\n' \
 
 $BCF view -i 'FILTER~"LowConf"'      superset.vcf.gz -Oz -o lowconf.vcf.gz      && $BCF index -f -t lowconf.vcf.gz
 $BCF view -i 'FILTER~"Unclassified"' superset.vcf.gz -Oz -o unclassified.vcf.gz && $BCF index -f -t unclassified.vcf.gz
+```
 
-# ---------- A3. Score one call set ----------
-#  Rules: (i) novel calls (not in superset) with tumor VAF < 5% are dropped
-#         (ii) calls at LowConf sites are dropped
-#  main  : calls at Unclassified sites also dropped
-#  strict: calls at Unclassified sites kept -> counted as false positives
+#### ---------- A3. Score one call set ----------
 
+#####  Rules: (i) novel calls (not in superset) with tumor VAF < 5% are dropped
+#####         (ii) calls at LowConf sites are dropped
+#####  main  : calls at Unclassified sites also dropped
+#####  strict: calls at Unclassified sites kept -> counted as false positives
+
+```bash
 score_somatic () {               # usage: score_somatic <label> <vcf> [bcftools view selection]
   local L=$1 V=$2; shift 2
   local S=$($BCF query -l $V | grep -iE '(_T|TUMOR)$' | head -1)
@@ -1169,9 +1178,11 @@ score_somatic () {               # usage: score_somatic <label> <vcf> [bcftools 
 }
 
 echo -e "$HEADER" > somatic_metrics.tsv
+```
 
-# ---------- A4. Call sets ----------
+#### ---------- A4. Call sets ----------
 
+```bash
 find $OUT_S -name "valid1*.vcf.gz" | sort          # list, then set the paths below
 CONS=$(find $OUT_S -name "valid1*_consensus.vcf.gz" | head -1)
 FILT=$(find $OUT_S -name "valid1*_filtered.vcf.gz"  | head -1)
@@ -1182,15 +1193,19 @@ STRELKA_INDEL=$OUT_S/05_variant_calling/somatic/snv/strelka2/valid1_T_strelka2_i
 MUSE=$OUT_S/05_variant_calling/somatic/snv/muse/valid1_T_muse.af.vcf.gz                                                 # <<<
 VARSCAN_SNV=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_snv.af.vcf.gz                                  # <<<
 VARSCAN_INDEL=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_indel.af.vcf.gz                              # <<<
+```
 
-# ---------- A5. Final call set (Table 1) and consensus ----------
+#### ---------- A5. Final call set (Table 1) and consensus ----------
 
+```bash
 score_somatic final_pass     $FILT -f PASS     # consensus + VAF/alt reads/depth/normal filters
 score_somatic consensus_pass $CONS -f PASS     # >= 2 callers
 score_somatic consensus_all  $CONS             # all Mutect2 PASS calls (LOWCONSENSUS included)
+```
 
-# ---------- A6. Each caller before (raw) and after (pass) its own filter (optional) ----------
+#### ---------- A6. Each caller before (raw) and after (pass) its own filter (optional) ----------
 
+```bash
 $BCF concat -a $STRELKA_SNV $STRELKA_INDEL | $BCF sort -Oz -o strelka2.vcf.gz - && $BCF index -f -t strelka2.vcf.gz
 $BCF concat -a $VARSCAN_SNV $VARSCAN_INDEL | $BCF sort -Oz -o varscan.vcf.gz -  && $BCF index -f -t varscan.vcf.gz
 score_somatic mutect2_raw   $M2
@@ -1203,36 +1218,44 @@ score_somatic varscan_raw   varscan.vcf.gz  -i 'INFO/SS=2'
 score_somatic varscan_pass  varscan.vcf.gz  -f PASS -i 'INFO/SS=2'
 
 column -t somatic_metrics.tsv
+```
 
 
+#### ---------------- B. GERMLINE (GIAB HG002) ----------------
 
-# ---------------- B. GERMLINE (GIAB HG002) ----------------
-
+```bash
 mkdir -p $OUT_G/benchmark && cd $OUT_G/benchmark
 
 echo "$OUT_G"; ls "$OUT_G" 
 CALLS=$(find $OUT_G -iname "*hg002*_filtered.vcf.gz"  | head -1); echo "calls: $CALLS"
 THR=$(find   $OUT_G -iname "*hg002*thresholds.bed.gz" | head -1); echo "thresholds: $THR"
+```
 
-# ---------- B1. Callable targets: >= 90% of bases at >= 10X ----------
+#### ---------- B1. Callable targets: >= 90% of bases at >= 10X ----------
 
+```bash
 zcat $THR | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="10X") c=i; if(!c){print "ERROR: no 10X column" > "/dev/stderr"; exit 1}; next}
                  ($3-$2)>0 && $c/($3-$2)>=0.9 {print $1"\t"$2"\t"$3}' \
   | sort -k1,1 -k2,2n > callable.bed
+```
 
-# ---------- B2. Evaluation region = callable targets inside GIAB confident regions ----------
+#### ---------- B2. Evaluation region = callable targets inside GIAB confident regions ----------
 
+```bash
 $BEDTOOLS intersect -a callable.bed -b $T/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed \
   | sort -k1,1 -k2,2n > callable_giab.bed
 $BEDTOOLS merge -i callable_giab.bed > HG002_eval.bed
 awk '{s+=$3-$2} END{print "germline evaluation region: " s/1e6 " Mb"}' HG002_eval.bed
+```
 
-# ---------- B3. Calls:  ------------------------------------
+#### ---------- B3. Calls:  ------------------------------------
 
+```bash
 $BCF index -f -t $CALLS 2>/dev/null; cp $CALLS hg002_calls.vcf.gz; cp $CALLS.tbi hg002_calls.vcf.gz.tbi
+```
+#### ---------- B4. Genotype-aware scoring: before filter (all records) and after filter (PASS) ----------
 
-# ---------- B4. Genotype-aware scoring: before filter (all records) and after filter (PASS) ----------
-
+```bash
 echo -e "$HEADER" > germline_metrics.tsv
 for m in before_filter after_filter; do
   opt=""; [ $m = before_filter ] && opt="--all-records"
@@ -1242,6 +1265,51 @@ for m in before_filter after_filter; do
   count_metrics vcfeval_germline_$m germline_$m | tee -a germline_metrics.tsv
 done
 column -t germline_metrics.tsv
+```
+
+#### ---------------- C. RNA FUSION - HCC1395 RNA-seq vs Talsania et al. 2022 fusion list ----------------
+
+```bash
+OUT_R=$DATA/<RNA run outdir>                                     # <<< outdir of the RNA fusion run
+SCRIPT=$PIPE/scripts/fusion_truth_match.py                       # <<< where you keep the script
+TRUTH=$T/Talsania_2022_AdditionalFile9.csv                       # <<< Talsania Additional file 9, saved as CSV
+mkdir -p $OUT_R/benchmark && cd $OUT_R/benchmark
+```
+
+#### ---------- C1. Calls and gene-name table ----------
+
+```bash
+CALLS=$(find $OUT_R -name "*_fusions_annotated.tsv" | head -1); echo "calls: $CALLS"
+# HGNC table, to translate renamed genes (download once into the truth folder)
+[ -s $T/hgnc_complete_set.txt ] || \
+  wget -O $T/hgnc_complete_set.txt https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt
+head -1 $TRUTH | tr ',' '\n' | grep -n "fusion"                  # check: the column "RNA-seq fusion_genes" must be listed
+```
+
+#### ---------- C2. Match calls to the list (gene order, renamed genes, intergenic lists handled) ----------
+
+```bash
+python3 $SCRIPT --truth $TRUTH --calls $CALLS --hgnc $T/hgnc_complete_set.txt --out fusion_truth_result.tsv
+```
+
+#### ---------- C3. Recovered fusions by consensus status and tier ----------
+
+```bash
+echo "== recovered, by consensus verdict"
+awk -F'\t' 'NR>1 && $4=="FOUND"{n[$7]++} END{for(k in n) print k"\t"n[k]}' fusion_truth_result.tsv | sort
+echo "== recovered, by tier"
+awk -F'\t' 'NR>1 && $4=="FOUND"{n[$8]++} END{for(k in n) print k"\t"n[k]}' fusion_truth_result.tsv | sort
+echo "== missed, but at least one partner gene appears in the calls"
+awk -F'\t' 'NR>1 && $4=="missed" && $9!="-"' fusion_truth_result.tsv | wc -l
+
+```
+#### ---------- C4. Calls that are not in the reference list ----------
+
+```bash
+total=$(grep -v '^#' $CALLS | tail -n +2 | wc -l)
+matched=$(awk -F'\t' 'NR>1 && $4=="FOUND"{print $5}' fusion_truth_result.tsv | sort -u | wc -l)
+echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the list: $((total - matched))"
+```
 ---
 
 ## Troubleshooting
