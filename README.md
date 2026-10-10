@@ -417,11 +417,31 @@ Params YAML entries for the two kits:
 
 ---
 
-### 5. Copy-number and MSI resources [Generate]
+### 5. Copy-number and MSI resources
+
+#### 5.1 Sequenza and MSI list [Generate]
 
 ```bash
 $SX $E/sequenza.sif sequenza-utils gc_wiggle --fasta $REF -w 50 -o $R/DBs_Somatic_VCFs/sequenza_d1.vd1_gc50.wig.gz
 $SX $E/msisensorpro.sif msisensor-pro scan -d $REF -o $R/DBs_Somatic_VCFs/msisensor_scan.list
+```
+
+#### 5.2 Germline copy-number resources (only with `run_gcnv: true` and ≥ 30 normals) [Generate]
+
+```bash
+G=$R/DBs_gCNV
+GCNV_BED=$R/ValidationBed/S07604624_Regions.bed          # demonstration kit
+# GCNV_BED=$R/BostonGeneBed/S31285117_Regions.bed        # own data (V7)
+$GATK gatk PreprocessIntervals -R $REF -L $GCNV_BED \
+  --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O $G/preprocessed_intervals.interval_list
+$GATK gatk AnnotateIntervals -R $REF -L $G/preprocessed_intervals.interval_list \
+  --interval-merging-rule OVERLAPPING_ONLY -O $G/annotated_intervals.tsv
+$GATK gatk IntervalListTools --INPUT $G/preprocessed_intervals.interval_list \
+  --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT $G/scatter
+i=0; for d in $G/scatter/temp_*; do i=$((i+1)); printf -v n '%04d' $i; cp "$d/scattered.interval_list" "$G/scatter_flat/shard_${n}.interval_list"; done
+awk 'BEGIN{OFS="\t"; print "CONTIG_NAME","PLOIDY_PRIOR_0","PLOIDY_PRIOR_1","PLOIDY_PRIOR_2","PLOIDY_PRIOR_3"
+  for (i=1;i<=22;i++) print "chr"i,"0.01","0.01","0.97","0.01"
+  print "chrX","0.01","0.49","0.49","0.01"; print "chrY","0.495","0.495","0.01","0.01"}' > $G/contig_ploidy_priors.tsv
 ```
 
 CNVkit runs against the matched normal (`cnvkit_pon: null`); a panel of normals can be added later.
@@ -586,8 +606,6 @@ v44 is the release the CTAT library (8.2) is built on, so STAR, Arriba, RNA QC a
 wget -c -P $R/DBs_RNA https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_44/gencode.v44.annotation.gtf.gz
 gunzip -kf $R/DBs_RNA/gencode.v44.annotation.gtf.gz      # the params YAML uses the uncompressed .gtf
 RGTF=$R/DBs_RNA/gencode.v44.annotation.gtf
-
-
 ```
 
 #### 8.2 CTAT genome library, GENCODE v44 [Download]
@@ -669,31 +687,12 @@ $SX $E/bcftool_cnvkit_vep_snpeff.sif python3 $P/make_refflat.py $RGTF $R/RefFlat
 } > $R/RNA_Intervals_Dir/gencode.v44.rrna.interval_list
 ```
 
----
-
-### 9. Germline copy-number resources (only with `run_gcnv: true` and ≥ 30 normals) [Generate]
-
-```bash
-G=$R/DBs_gCNV
-GCNV_BED=$R/ValidationBed/S07604624_Regions.bed          # demonstration kit
-# GCNV_BED=$R/BostonGeneBed/S31285117_Regions.bed        # own data (V7)
-$GATK gatk PreprocessIntervals -R $REF -L $GCNV_BED \
-  --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O $G/preprocessed_intervals.interval_list
-$GATK gatk AnnotateIntervals -R $REF -L $G/preprocessed_intervals.interval_list \
-  --interval-merging-rule OVERLAPPING_ONLY -O $G/annotated_intervals.tsv
-$GATK gatk IntervalListTools --INPUT $G/preprocessed_intervals.interval_list \
-  --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT $G/scatter
-i=0; for d in $G/scatter/temp_*; do i=$((i+1)); printf -v n '%04d' $i; cp "$d/scattered.interval_list" "$G/scatter_flat/shard_${n}.interval_list"; done
-awk 'BEGIN{OFS="\t"; print "CONTIG_NAME","PLOIDY_PRIOR_0","PLOIDY_PRIOR_1","PLOIDY_PRIOR_2","PLOIDY_PRIOR_3"
-  for (i=1;i<=22;i++) print "chr"i,"0.01","0.01","0.97","0.01"
-  print "chrX","0.01","0.49","0.49","0.01"; print "chrY","0.495","0.495","0.01","0.01"}' > $G/contig_ploidy_priors.tsv
-```
 
 ---
 
-### 10. Benchmark truth sets
+### 9. Benchmark truth sets
 
-#### 10.1 SEQC2 somatic, HCC1395 [Download + Generate]
+#### 9.1 SEQC2 somatic, HCC1395 [Download + Generate]
 
 ```bash
 T=$R/truth_data
@@ -711,7 +710,7 @@ $GATK bedtools intersect -a $R/ValidationBed/S07604624_Regions.pad100.bed.gz -b 
   > $R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
 ```
 
-#### 10.2 GIAB HG002 germline, v4.2.1 [Download]
+#### 9.2 GIAB HG002 germline, v4.2.1 [Download]
 
 ```bash
 GB=https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/NISTv4.2.1/GRCh38
@@ -720,7 +719,7 @@ wget -c -P $R/truth_data $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz $GB/HG002
                          $GB/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed
 ```
 
-#### 10.3 RTG reference for vcfeval [Generate]
+#### 9.3 RTG reference for vcfeval [Generate]
 
 ```bash
 $SX $E/rtg_tools.sif rtg format -o $R/truth_data/GRCh38_sdf $REF
@@ -728,7 +727,7 @@ $SX $E/rtg_tools.sif rtg format -o $R/truth_data/GRCh38_sdf $REF
 
 ---
 
-### 11. Library check before the first run: inline UMIs
+### 10. Library check before the first run: inline UMIs
 
 Look at the base composition of the first 15 cycles of R1 and R2, for tumor and normal, in several patients.
 A random block followed by a fixed block means an inline UMI. In the RCC cohort: 3 random bases, 2 fixed, then genome,
@@ -743,7 +742,6 @@ zcat $FQ | head -40000 | awk 'NR%4==2 {n++; for (i=1;i<=15;i++) c[i, substr($0,i
 
 ---
 
----
 
 ## Samplesheets
 
