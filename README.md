@@ -690,44 +690,7 @@ $SX $E/bcftool_cnvkit_vep_snpeff.sif python3 $P/make_refflat.py $RGTF $R/RefFlat
 
 ---
 
-### 9. Benchmark truth sets
-
-#### 9.1 SEQC2 somatic, HCC1395 [Download + Generate]
-
-```bash
-T=$R/truth_data
-S2=https://ftp-trace.ncbi.nlm.nih.gov/seqc/ftp/Somatic_Mutation_WG/release/v1.2.1
-wget -c -P $T $S2/high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz $S2/high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz \
-              $S2/High-Confidence_Regions_v1.2.bed $S2/sSNV.MSDUKT.superSet.v1.2.vcf.gz $S2/sINDEL.MDKT.superSet.v1.2.vcf.gz
-$SX $E/bcftool_cnvkit_vep_snpeff.sif bash -c "set -euo pipefail; cd $T
-  for f in high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz \
-           sSNV.MSDUKT.superSet.v1.2.vcf.gz sINDEL.MDKT.superSet.v1.2.vcf.gz; do bcftools index -f -t \$f; done
-  bcftools concat -a high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz \
-    -Oz -o SEQC2_Truth_v1.2.1.vcf.gz
-  bcftools index -f -t SEQC2_Truth_v1.2.1.vcf.gz"
-# evaluation region: padded V6 + UTR targets x SEQC2 high-confidence regions
-$GATK bedtools intersect -a $R/ValidationBed/S07604624_Regions.pad100.bed.gz -b $T/High-Confidence_Regions_v1.2.bed \
-  > $R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
-```
-
-#### 9.2 GIAB HG002 germline, v4.2.1 [Download]
-
-```bash
-GB=https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/NISTv4.2.1/GRCh38
-curl -s $GB/ | grep -o 'href="[^"]*benchmark[^"]*"'          # confirm the file names
-wget -c -P $R/truth_data $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz.tbi \
-                         $GB/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed
-```
-
-#### 9.3 RTG reference for vcfeval [Generate]
-
-```bash
-$SX $E/rtg_tools.sif rtg format -o $R/truth_data/GRCh38_sdf $REF
-```
-
----
-
-### 10. Library check before the first run: inline UMIs
+### 9. Library check before the first run: inline UMIs
 
 Look at the base composition of the first 15 cycles of R1 and R2, for tumor and normal, in several patients.
 A random block followed by a fixed block means an inline UMI. In the RCC cohort: 3 random bases, 2 fixed, then genome,
@@ -806,24 +769,16 @@ stop_at:                classification
 write_manifest:         true
 preflight_references:   true            # check references before any job is submitted
 
-# ---------------- Library ----------------
-dedup_mode:             markdup         # umi_markdup| umi_consensus | markdup (demonstration: no UMIs)
-umi_read_structure:     null
-# dedup_mode:           umi_markdup     # own data: inline UMIs
-# umi_read_structure:   '3M2S+T' # per-mate: 3bp UMI, 2bp linker skip, rest template
-umi_read_structure_r2:  null     # R2 structure if it differs from R1 (e.g. '+T' for UMI on R1 only); null = same as R1
-bqsr:                   false
-skip_trimming:          false
-make_cram:              false     # BAM->CRAM conversion (storage only). false = keep BAM.
-germline_on_normals:    false     # true = germline report for each matched normal (needs consent)
-
 # ---------------- Input / output ----------------
+pipeline_root:          /home/<user>/genomics_pipeline
 container_dir:          /home/<user>/genomics_pipeline/envs
 fastq_root:             /scratch/<user>/fastq
 work_root:              /scratch/<user>/work_demo
 outdir:                 /home/<user>/Result_demo
 dna_samplesheet:        /home/<user>/samples_dna_demo.csv
-rna_samplesheet:        null
+rna_samplesheet:        /home/<user>/samples_rna_demo.csv
+
+# directories the containers may read/write
 bind_paths:             [/home/<user>, /scratch/<user>]
 
 # ---------------- Reference genome ----------------
@@ -833,23 +788,30 @@ ref_fasta:              ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.fa
 ref_fai:                ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.fa.fai
 ref_dict:               ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.dict
 
+# DNA arms - shared (somatic and germline)
+# ---------------- Library ----------------
+dedup_mode:             markdup         # umi_markdup| umi_consensus | markdup (demonstration: no UMIs)
+umi_read_structure:     null
+# dedup_mode:           umi_markdup     # own data: inline UMIs
+# umi_read_structure:   '3M2S+T' # per-mate: 3bp UMI, 2bp linker skip, rest template
+umi_read_structure_r2:  null     # R2 structure if it differs from R1 (e.g. '+T' for UMI on R1 only); null = same as R1
+skip_trimming:          false
+bqsr:                   false
+make_cram:              false     # BAM->CRAM conversion (storage only). false = keep BAM.
+
 # ---------------- Capture: demonstration = SureSelect V6 + UTR (S07604624) ----------------
 interval_bed:           ${projectDir}/../references/ValidationBed/S07604624_Regions.bed
 call_regions_gz:        ${projectDir}/../references/ValidationBed/S07604624_Regions.pad100.bed.gz
 bait_interval_list:     ${projectDir}/../references/ValidationBed/Covered_Baits.interval_list
 target_interval_list:   ${projectDir}/../references/ValidationBed/Targets_Regions.interval_list
-scatter_intervals:      ${projectDir}/../references/Validation_Scatter_Intervals_Dir_V6_pad100
-germline_scatter_intervals: ${projectDir}/../references/Validation_Germline_Scatter_150_V6_pad100
+
 
 # ---------------- Capture: own data = SureSelect V7 (S31285117) ----------------
 # (reconciled to d1.vd1; need .tbi)
-
 # interval_bed:           ${projectDir}/../references/BostonGeneBed/S31285117_Regions.bed
 # call_regions_gz:        ${projectDir}/../references/BostonGeneBed/S31285117_Regions.pad100.bed.gz
 # bait_interval_list:     ${projectDir}/../references/BostonGeneBed/MergedProbes.interval_list
 # target_interval_list:   ${projectDir}/../references/BostonGeneBed/Regions.interval_list
-# scatter_intervals:      ${projectDir}/../references/Scatter_Intervals_Dir_V7_pad100
-# germline_scatter_intervals: ${projectDir}/../references/Germline_Scatter_150_pad100
 
 # ---------------- Known sites (BQSR, germline) ----------------
 # (reconciled to d1.vd1; need .tbi)
@@ -857,9 +819,24 @@ dbsnp:                  ${projectDir}/../references/DBs_SNP_Indels/Homo_sapiens_
 mills:                  ${projectDir}/../references/DBs_SNP_Indels/Mills_and_1000G_gold_standard.indels.hg38.d1vd1.vcf.gz
 known_indels:           ${projectDir}/../references/DBs_SNP_Indels/Homo_sapiens_assembly38.known_indels.d1vd1.vcf.gz
 
-# ---------------- Somatic ----------------
+# ---------------- Sample QC ----------------
 somalier_sites:         ${projectDir}/../references/DBs_Somatic_VCFs/somalier_hg38.vcf.gz
+verifybamid_db:         null
+coverage_report_bed:    ${projectDir}/../references/DBs_Analytic_Metrics/reportable_genes_MANE_CDS.bed
+
+
+# ---------------- Annotation (both DNA arms) ----------------
+vep_cache_dir:          ${projectDir}/../references/DB_VEP_Cache
+vep_plugins_dir:        null
+clinvar_vcf:            ${projectDir}/../references/DBs_Annot/clinvar_chr.vcf.gz
+annotsv_dir:            ${projectDir}/../references/DBs_AnnotSV
+cosmic_cgc_tsv:         ${projectDir}/../references/DBs_Annot/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz
+
+
+# ------------ Somatic arm (analysis: somatic) ----------------
+scatter_intervals:      ${projectDir}/../references/Validation_Scatter_Intervals_Dir_V6_pad100
 germline_resource:      ${projectDir}/../references/DBs_Somatic_VCFs/af-only-gnomad.d1vd1.vcf.gz
+# scatter_intervals:      ${projectDir}/../references/Scatter_Intervals_Dir_V7_pad100
 pileup_variants:        ${projectDir}/../references/DBs_Somatic_VCFs/small_exac_common_3.d1vd1.vcf.gz
 # Choose either 1000G PON or your custom PON for RCC
 panel_of_normals:       ${projectDir}/../references/DBs_Somatic_VCFs/1000g_pon.d1vd1.vcf.gz
@@ -870,35 +847,29 @@ msisensor_list:         ${projectDir}/../references/DBs_Somatic_VCFs/msisensor_s
 sequenza_gc_wiggle:     ${projectDir}/../references/DBs_Somatic_VCFs/sequenza_d1.vd1_gc50.wig.gz
 gene_bed:               ${projectDir}/../references/GRCh38/GRCh38_ensembl_115_genes.bed
 arm_bed:                ${projectDir}/../references/DBs_Analytic_Metrics/GRCh38_arms.bed
-
-# ---------------- Annotation and reporting ----------------
-vep_cache_dir:          ${projectDir}/../references/DB_VEP_Cache
-vep_plugins_dir:        null
-clinvar_vcf:            ${projectDir}/../references/DBs_Annot/clinvar_chr.vcf.gz
 cosmic_vcf:             ${projectDir}/../references/DBs_Annot/cosmic_genom_mut_norm_v104_chr_dedup.vcf.gz
-cosmic_cgc_tsv:         ${projectDir}/../references/DBs_Annot/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz
 tmb_coding_bed:         ${projectDir}/../references/GRCh38/GRCh38_ens115_MANE_CDS.bed
-coverage_report_bed:    ${projectDir}/../references/DBs_Analytic_Metrics/reportable_genes_MANE_CDS.bed
-germline_report_genes:  ${projectDir}/../references/DBs_Analytic_Metrics/reportable_genes.txt
-annotsv_dir:            ${projectDir}/../references/DBs_AnnotSV
+germline_on_normals:    false     # true = germline report for each matched normal 
 
-# ---------------- Germline ----------------
+# ------------ Germline arm (analysis: germline) ----------------
+germline_scatter_intervals: ${projectDir}/../references/Validation_Germline_Scatter_150_V6_pad100
+# germline_scatter_intervals: ${projectDir}/../references/Germline_Scatter_150_pad100
 germline_caller:        haplotypecaller   # haplotypecaller | deepvariant
 germline_filter:        nv                # nv (any sample number NVScoreVariants) | vqsr (>= 30 samples)
 vqsr_min_samples:       30  # minimum samples before VQSR is allowed (else use 'nv')
 run_gcnv:               false             # true only with >= 30 normals of one kit
 gcnv_min_samples:       30
-ermline_ba1_af:         0.05
-verifybamid_db:         null
+germline_ba1_af:         0.05
 hapmap:                 ${projectDir}/../references/DBs_Germline_VCFs/hapmap_3.3.d1vd1.vcf.gz
 omni:                   ${projectDir}/../references/DBs_Germline_VCFs/1000g_omni2.5.d1vd1.vcf.gz
 thousandg_snps:         ${projectDir}/../references/DBs_Germline_VCFs/1000g_phase1_snps_high_conf.d1vd1.vcf.gz
+germline_report_genes:  ${projectDir}/../references/DBs_Analytic_Metrics/reportable_genes.txt
 preprocessed_intervals:   ${projectDir}/../references/DBs_gCNV/preprocessed_intervals.interval_list
 contig_ploidy_priors:     ${projectDir}/../references/DBs_gCNV/contig_ploidy_priors.tsv
 gcnv_scatter_intervals:   ${projectDir}/../references/DBs_gCNV/scatter_flat
 gcnv_annotated_intervals: ${projectDir}/../references/DBs_gCNV/annotated_intervals.tsv
 
-# ---------------- RNA (GENCODE v44 + CTAT v44) ----------------
+# ---------------- RNA fusion arm(analysis: rna_fusion) ----------------
 rna_use_ctat_reference: false
 gtf:                    ${projectDir}/../references/DBs_RNA/gencode.v44.annotation.gtf
 star_index:             ${projectDir}/../references/StarIndex_gencode_v44
@@ -935,7 +906,6 @@ For the other arms, copy the file and change only:
 Launch from a login node or a long-running interactive job; Nextflow submits every task to LSF.
 
 ```bash
-cd $HOME/genomics_pipeline
 nextflow run ${HOME}/genomics_pipeline/nextflow/main.nf -c ${HOME}/genomics_pipeline/nextflow/nextflow.config \
   -params-file params_demo.yaml -profile production -resume
 ```
@@ -1065,6 +1035,213 @@ Check the exact top-level folder names with `ls <outdir>` after the first run.
 
 Helper scripts: `make_figures.py` (Figures 2-5, Tables 1-2), `eval_germline.sh`, `fusion_truth_match.py`.
 
+---
+
+### 10. Benchmark truth sets
+
+# Set once
+
+PIPE=${HOME}/genomics_pipeline
+DATA=${HOME}/test_data
+R=$PIPE/references
+E=$PIPE/envs
+T=$R/truth_data
+REF=$R/GRCh38/GRCh38.d1.vd1.fa
+SDF=$T/GRCh38_sdf
+SX="singularity exec -B $PIPE -B $DATA"
+BCF="$SX $E/bwa_samtools_fastp_fgbio_bcftools.sif bcftools"
+RTG="$SX $E/rtg_tools.sif rtg"
+BEDTOOLS="$SX $E/gatk.sif bedtools"
+
+
+#### 10.1 RTG reference for vcfeval [Generate]
+
+```bash
+$RTG format -o $R/truth_data/GRCh38_sdf $REF
+```
+#### 10.2 SEQC2 somatic, HCC1395 [Download + Generate]
+
+```bash
+S2=https://ftp-trace.ncbi.nlm.nih.gov/seqc/ftp/Somatic_Mutation_WG/release/v1.2.1
+wget -c -P $T $S2/high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz $S2/high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz \
+              $S2/High-Confidence_Regions_v1.2.bed $S2/sSNV.MSDUKT.superSet.v1.2.vcf.gz $S2/sINDEL.MDKT.superSet.v1.2.vcf.gz
+$SX $E/bcftool_cnvkit_vep_snpeff.sif bash -c "set -euo pipefail; cd $T
+  for f in high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz \
+           sSNV.MSDUKT.superSet.v1.2.vcf.gz sINDEL.MDKT.superSet.v1.2.vcf.gz; do bcftools index -f -t \$f; done
+  bcftools concat -a high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz \
+    -Oz -o SEQC2_Truth_v1.2.1.vcf.gz
+  bcftools index -f -t SEQC2_Truth_v1.2.1.vcf.gz"
+# evaluation region: padded V6 + UTR targets x SEQC2 high-confidence regions
+$BEDTOOLS intersect -a $R/ValidationBed/S07604624_Regions.pad100.bed.gz -b $T/High-Confidence_Regions_v1.2.bed \
+  > $R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
+```
+
+#### 10.3 GIAB HG002 germline, v4.2.1 [Download]
+
+```bash
+GB=https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/NISTv4.2.1/GRCh38
+curl -s $GB/ | grep -o 'href="[^"]*benchmark[^"]*"'          # confirm the file names
+wget -c -P $R/truth_data $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz.tbi \
+                         $GB/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed
+```
+
+
+# =================  Benchmark your calls =================
+# Set once
+
+OUT_S=$DATA/Result_valid_8_Oct_26_som          # <<< outdir of the SEQC2 somatic run
+OUT_G=$DATA/Result_valid_8_Oct_26_germ                 # <<< outdir of the HG002 germline run
+
+HEADER="callset\ttype\ttruth\tTP\tFP\tFN\trecall\tprecision\tF1"
+
+# ---------- Counts and metrics per variant type from one vcfeval folder ----------
+count_metrics () {               # usage: count_metrics <vcfeval_dir> <label>
+  for t in snps indels; do
+    TPb=$($BCF view -H -v $t $1/tp-baseline.vcf.gz | wc -l)   # truth variants found
+    FN=$($BCF  view -H -v $t $1/fn.vcf.gz          | wc -l)   # truth variants missed
+    TPc=$($BCF view -H -v $t $1/tp.vcf.gz          | wc -l)   # calls that are true
+    FP=$($BCF  view -H -v $t $1/fp.vcf.gz          | wc -l)   # calls that are false
+    awk -v l=$2 -v t=$t -v a=$TPb -v n=$FN -v c=$TPc -v f=$FP 'BEGIN{
+      r=(a+n)?a/(a+n):0; p=(c+f)?c/(c+f):0; F=(p+r)?2*p*r/(p+r):0;
+      printf "%s\t%s\t%d\t%d\t%d\t%d\t%.4f\t%.4f\t%.4f\n", l, t, a+n, a, f, n, r, p, F }'
+  done
+}
+
+# ======================================================================
+#  A. SOMATIC - SEQC2 HCC1395 / HCC1395BL (valid1)
+# ======================================================================
+mkdir -p $OUT_S/benchmark && cd $OUT_S/benchmark
+EVAL=$R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
+awk '{s+=$3-$2} END{print "somatic evaluation region: " s/1e6 " Mb"}' $EVAL
+
+# ---------- A1. Truth: HighConf + MedConf, FILTER = PASS, no samples, split alleles ----------
+
+$BCF view -G $T/SEQC2_Truth_v1.2.1.vcf.gz \
+  | awk 'BEGIN{OFS="\t"} /^#/{print; next} {$7="PASS"; print}' \
+  | $BCF norm -m -any -f $REF -Oz -o truth_somatic.vcf.gz -
+$BCF index -f -t truth_somatic.vcf.gz
+
+#---------- A2. Superset and its non-truth labels (FILTER column) ----------
+
+$BCF concat -a $T/sSNV.MSDUKT.superSet.v1.2.vcf.gz $T/sINDEL.MDKT.superSet.v1.2.vcf.gz \
+  | $BCF sort | $BCF norm -m -any -f $REF -Oz -o superset.vcf.gz -
+$BCF index -f -t superset.vcf.gz
+
+$BCF query -f '%FILTER\n' superset.vcf.gz | tr ';' '\n' \
+  | grep -E '^(HighConf|MedConf|LowConf|Unclassified|REJECT)$' | sort | uniq -c   # label counts
+
+$BCF view -i 'FILTER~"LowConf"'      superset.vcf.gz -Oz -o lowconf.vcf.gz      && $BCF index -f -t lowconf.vcf.gz
+$BCF view -i 'FILTER~"Unclassified"' superset.vcf.gz -Oz -o unclassified.vcf.gz && $BCF index -f -t unclassified.vcf.gz
+
+# ---------- A3. Score one call set ----------
+#  Rules: (i) novel calls (not in superset) with tumor VAF < 5% are dropped
+#         (ii) calls at LowConf sites are dropped
+#  main  : calls at Unclassified sites also dropped
+#  strict: calls at Unclassified sites kept -> counted as false positives
+
+score_somatic () {               # usage: score_somatic <label> <vcf> [bcftools view selection]
+  local L=$1 V=$2; shift 2
+  local S=$($BCF query -l $V | grep -iE '(_T|TUMOR)$' | head -1)
+  [ -n "$S" ] || { echo "ERROR: no tumor column in $V"; return 1; }
+  echo "== $L   tumor column: $S"
+
+  $BCF view -s "$S" "$@" $V | $BCF norm -m -any -f $REF -Oz -o $L.calls.vcf.gz -
+  $BCF index -f -t $L.calls.vcf.gz
+
+  # (i) novel calls: keep only tumor VAF >= 5%
+  $BCF isec -C -w1 $L.calls.vcf.gz superset.vcf.gz -Oz -o $L.novel.vcf.gz
+  $BCF view -i 'FMT/AF>=0.05' $L.novel.vcf.gz -Oz -o $L.novel_keep.vcf.gz
+  $BCF index -f -t $L.novel_keep.vcf.gz
+
+  # calls at superset sites; (ii) drop LowConf
+  $BCF isec -n=2 -w1 $L.calls.vcf.gz superset.vcf.gz -Oz -o $L.known.vcf.gz && $BCF index -f -t $L.known.vcf.gz
+  $BCF isec -C -w1 $L.known.vcf.gz lowconf.vcf.gz -Oz -o $L.known_strict.vcf.gz && $BCF index -f -t $L.known_strict.vcf.gz
+  $BCF isec -C -w1 $L.known_strict.vcf.gz unclassified.vcf.gz -Oz -o $L.known_main.vcf.gz && $BCF index -f -t $L.known_main.vcf.gz
+
+  for s in main strict; do
+    $BCF concat -a $L.novel_keep.vcf.gz $L.known_$s.vcf.gz | $BCF view -G | $BCF sort -Oz -o $L.$s.vcf.gz -
+    $BCF index -f -t $L.$s.vcf.gz
+    rm -rf vcfeval_${L}_$s
+    $RTG vcfeval -b truth_somatic.vcf.gz -c $L.$s.vcf.gz -e $EVAL -t $SDF \
+                 --sample ALT --all-records -o vcfeval_${L}_$s > vcfeval_${L}_$s.log 2>&1
+    count_metrics vcfeval_${L}_$s ${L}_$s | tee -a somatic_metrics.tsv
+  done
+}
+
+echo -e "$HEADER" > somatic_metrics.tsv
+
+# ---------- A4. Call sets ----------
+
+find $OUT_S -name "valid1*.vcf.gz" | sort          # list, then set the paths below
+CONS=$(find $OUT_S -name "valid1*_consensus.vcf.gz" | head -1)
+FILT=$(find $OUT_S -name "valid1*_filtered.vcf.gz"  | head -1)
+#   Per-caller VCFs (optional). If not in the outdir, take them from the work directory.
+M2=$OUT_S/05_variant_calling/somatic/snv/mutect2/valid1_T_mutect2.vcf.gz                                  # <<<
+STRELKA_SNV=$OUT_S/05_variant_calling/somatic/snv/strelka2/valid1_T_strelka2_snvs.af.vcf.gz                                   # <<<
+STRELKA_INDEL=$OUT_S/05_variant_calling/somatic/snv/strelka2/valid1_T_strelka2_indels.af.vcf.gz                              # <<<
+MUSE=$OUT_S/05_variant_calling/somatic/snv/muse/valid1_T_muse.af.vcf.gz                                                 # <<<
+VARSCAN_SNV=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_snv.af.vcf.gz                                  # <<<
+VARSCAN_INDEL=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_indel.af.vcf.gz                              # <<<
+
+# ---------- A5. Final call set (Table 1) and consensus ----------
+
+score_somatic final_pass     $FILT -f PASS     # consensus + VAF/alt reads/depth/normal filters
+score_somatic consensus_pass $CONS -f PASS     # >= 2 callers
+score_somatic consensus_all  $CONS             # all Mutect2 PASS calls (LOWCONSENSUS included)
+
+# ---------- A6. Each caller before (raw) and after (pass) its own filter (optional) ----------
+
+$BCF concat -a $STRELKA_SNV $STRELKA_INDEL | $BCF sort -Oz -o strelka2.vcf.gz - && $BCF index -f -t strelka2.vcf.gz
+$BCF concat -a $VARSCAN_SNV $VARSCAN_INDEL | $BCF sort -Oz -o varscan.vcf.gz -  && $BCF index -f -t varscan.vcf.gz
+score_somatic mutect2_raw   $M2
+score_somatic mutect2_pass  $M2             -f PASS
+score_somatic strelka2_raw  strelka2.vcf.gz
+score_somatic strelka2_pass strelka2.vcf.gz -f PASS
+score_somatic muse_raw      $MUSE
+score_somatic muse_pass     $MUSE           -e 'FILTER~"Tier5"'
+score_somatic varscan_raw   varscan.vcf.gz  -i 'INFO/SS=2'
+score_somatic varscan_pass  varscan.vcf.gz  -f PASS -i 'INFO/SS=2'
+
+column -t somatic_metrics.tsv
+
+
+
+# ---------------- B. GERMLINE (GIAB HG002) ----------------
+
+mkdir -p $OUT_G/benchmark && cd $OUT_G/benchmark
+
+echo "$OUT_G"; ls "$OUT_G" 
+CALLS=$(find $OUT_G -iname "*hg002*_filtered.vcf.gz"  | head -1); echo "calls: $CALLS"
+THR=$(find   $OUT_G -iname "*hg002*thresholds.bed.gz" | head -1); echo "thresholds: $THR"
+
+# ---------- B1. Callable targets: >= 90% of bases at >= 10X ----------
+
+zcat $THR | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="10X") c=i; if(!c){print "ERROR: no 10X column" > "/dev/stderr"; exit 1}; next}
+                 ($3-$2)>0 && $c/($3-$2)>=0.9 {print $1"\t"$2"\t"$3}' \
+  | sort -k1,1 -k2,2n > callable.bed
+
+# ---------- B2. Evaluation region = callable targets inside GIAB confident regions ----------
+
+$BEDTOOLS intersect -a callable.bed -b $T/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed \
+  | sort -k1,1 -k2,2n > callable_giab.bed
+$BEDTOOLS merge -i callable_giab.bed > HG002_eval.bed
+awk '{s+=$3-$2} END{print "germline evaluation region: " s/1e6 " Mb"}' HG002_eval.bed
+
+# ---------- B3. Calls:  ------------------------------------
+
+$BCF index -f -t $CALLS 2>/dev/null; cp $CALLS hg002_calls.vcf.gz; cp $CALLS.tbi hg002_calls.vcf.gz.tbi
+
+# ---------- B4. Genotype-aware scoring: before filter (all records) and after filter (PASS) ----------
+
+echo -e "$HEADER" > germline_metrics.tsv
+for m in before_filter after_filter; do
+  opt=""; [ $m = before_filter ] && opt="--all-records"
+  rm -rf vcfeval_germline_$m
+  $RTG vcfeval -b $T/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz -c hg002_calls.vcf.gz \
+               -e HG002_eval.bed -t $SDF $opt -o vcfeval_germline_$m > vcfeval_germline_$m.log 2>&1
+  count_metrics vcfeval_germline_$m germline_$m | tee -a germline_metrics.tsv
+done
+column -t germline_metrics.tsv
 ---
 
 ## Troubleshooting
