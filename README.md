@@ -1331,8 +1331,7 @@ echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the
 
 ## Citation
 
-If you use PAPIO, please cite the protocol (Chauhan et al., STAR Protocols, in preparation) and the tools listed in
-the Containers table. Code and versioned containers: Zenodo DOI [to be added].
+If you use PAPIO, please cite the protocol and the tools listed in the Containers table. Code and versioned containers: Zenodo DOI [10.5281/zenodo.23176505].
 
 ## Contact
 
