@@ -1117,20 +1117,23 @@ mkdir -p $OUT_S/benchmark && cd $OUT_S/benchmark
 EVAL=$R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
 awk '{s+=$3-$2} END{print "somatic evaluation region: " s/1e6 " Mb"}' $EVAL
 ```
+
 #### ---------- A1. Truth: HighConf + MedConf, FILTER = PASS, no samples, split alleles ----------
 
 ```bash
 $BCF view -G $T/SEQC2_Truth_v1.2.1.vcf.gz \
   | awk 'BEGIN{OFS="\t"} /^#/{print; next} {$7="PASS"; print}' \
-  | $BCF norm -m -any -f $REF -Oz -o truth_somatic.vcf.gz -
+  | $BCF norm -a --atom-overlaps . -m -any -f $REF | $BCF sort -Oz -o truth_somatic.vcf.gz -
 $BCF index -f -t truth_somatic.vcf.gz
 ```
 
-####---------- A2. Superset and its non-truth labels (FILTER column) ----------
+
+#### ---------- A2. Superset and its non-truth labels (FILTER column) ----------
 
 ```bash
 $BCF concat -a $T/sSNV.MSDUKT.superSet.v1.2.vcf.gz $T/sINDEL.MDKT.superSet.v1.2.vcf.gz \
-  | $BCF sort | $BCF norm -m -any -f $REF -Oz -o superset.vcf.gz -
+  | $BCF sort | $BCF norm -a --atom-overlaps . -m -any -f $REF | $BCF sort -Oz -o superset.vcf.gz -
+
 $BCF index -f -t superset.vcf.gz
 
 $BCF query -f '%FILTER\n' superset.vcf.gz | tr ';' '\n' \
@@ -1154,7 +1157,7 @@ score_somatic () {               # usage: score_somatic <label> <vcf> [bcftools 
   [ -n "$S" ] || { echo "ERROR: no tumor column in $V"; return 1; }
   echo "== $L   tumor column: $S"
 
-  $BCF view -s "$S" "$@" $V | $BCF norm -m -any -f $REF -Oz -o $L.calls.vcf.gz -
+  $BCF view -s "$S" "$@" $V | $BCF norm -a --atom-overlaps . -m -any -f $REF | $BCF sort -Oz -o $L.calls.vcf.gz -
   $BCF index -f -t $L.calls.vcf.gz
 
   # (i) novel calls: keep only tumor VAF >= 5%
@@ -1270,9 +1273,9 @@ column -t germline_metrics.tsv
 #### ---------------- C. RNA FUSION - HCC1395 RNA-seq vs Talsania et al. 2022 fusion list ----------------
 
 ```bash
-OUT_R=$DATA/<RNA run outdir>                                     # <<< outdir of the RNA fusion run
-SCRIPT=$PIPE/scripts/fusion_truth_match.py                       # <<< where you keep the script
-TRUTH=$T/Talsania_2022_AdditionalFile9.csv                       # <<< Talsania Additional file 9, saved as CSV
+OUT_R=$DATA/Result_valid_8_Oct_26_som                                    # <<< outdir of the RNA fusion run
+SCRIPT=$PIPE/fusion_truth_match.py                       # <<< where you keep the script
+TRUTH=$T/Talsania_2022_Add_File9.csv                      # <<< Talsania Additional file 9, saved as CSV
 mkdir -p $OUT_R/benchmark && cd $OUT_R/benchmark
 ```
 

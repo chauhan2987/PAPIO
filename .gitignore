@@ -13,8 +13,9 @@ references
 # Logs
 Log
 
-# Notes
+# Notes 
 Notes.md
+*.py
 
 # container url generator
 wave
