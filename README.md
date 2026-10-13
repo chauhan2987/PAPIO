@@ -189,9 +189,13 @@ cat > Dockerfile <<'EOF'
 FROM condaforge/mambaforge:latest
 RUN mamba install -y -c conda-forge -c bioconda \
     python=3.10.0 r-sequenza=3.0.0 sequenza-utils=3.0.0 \
-    bioconductor-copynumber bioconductor-genomeinfodb r-biocmanager samtools htslib \
+    bioconductor-copynumber bioconductor-genomeinfodb r-biocmanager r-remotes samtools htslib \
     && mamba clean -afy
 RUN R -e 'BiocManager::install("GenomeInfoDbData", update=FALSE, ask=FALSE)'
+# Bioconductor copynumber rejects assembly="hg38"; replace it with the hg38-capable fork (pinned commit)
+RUN R -e 'remotes::install_github("ShixiangWang/copynumber@2e31d59f558d5e3e44215da2f612707791e3f030", dependencies=FALSE, upgrade="never")'
+# stop the build if hg38 is still not supported
+RUN Rscript -e 'library(copynumber); p<-sort(runif(200,1e6,2e8)); r<-aspcf(logR=data.frame(chrom=1,pos=p,s=rnorm(200)), BAF=data.frame(chrom=1,pos=p,s=runif(200)), assembly="hg38", verbose=FALSE); cat("copynumber hg38 OK\n")'
 ENV LC_ALL=C.UTF-8 LANG=C.UTF-8
 EOF
 ```
