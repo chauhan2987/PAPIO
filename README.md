@@ -990,7 +990,6 @@ reference file is set. Stages run in the order listed.
 |---|---|---|
 | 1 mapping | `STAR_ALIGN` (two-pass, chimeric output); `CRAM_CONVERT` | required; CRAM = toggle (`rna_cram_convert`) |
 | 3 metrics | `MARKDUP_RNA` (QC only), `RNASEQ_METRICS`, `SAMTOOLS_STATS`, strandedness inference; `MULTIQC` | required |
-| | `QUANT_RNA` (salmon / kallisto) | toggle (`run_quant`, off) |
 | 5 variant calling | `ARRIBA`; `STARFUSION` (kickstart from STAR chimeric junctions); `FUSIONCATCHER` | toggle (`use_arriba` on, `use_starfusion` on, `use_fusioncatcher` off) |
 | | `FUSION_CONSENSUS` → `FILTER_FUSION_CANDIDATES` → `FUSIONINSPECTOR` | consensus required; inspector = toggle (`use_fusioninspector`) |
 | 6 annotation | `ANNOTATE_FUSIONS` (known fusions + COSMIC CGC → tiers) | required |
@@ -1033,11 +1032,11 @@ Check the exact top-level folder names with `ls <outdir>` after the first run.
 
 | Arm | Data | Truth set | Comparison |
 |---|---|---|---|
-| Somatic | SEQC2 HCC1395 (SRR7890883) / HCC1395BL (SRR7890874), SureSelect V6 + UTR; SRA SRP162370 | SEQC2 v1.2.1 high-confidence SNVs/indels and regions (step 10.1) | `rtg vcfeval --sample ALT` on site-only VCFs, SNVs and indels separately; LowConf/Unclassified/REJECT sites and novel calls < 5% VAF excluded |
+| Somatic | SEQC2 HCC1395 (SRR7890883) / HCC1395BL (SRR7890874), SureSelect V6 + UTR; SRA SRP162370 | SEQC2 v1.2.1 high-confidence SNVs/indels and regions (step 10.2) | `rtg vcfeval --sample ALT` on site-only VCFs, SNVs and indels separately; LowConf/Unclassified/REJECT sites and novel calls < 5% VAF excluded |
 | Germline | GIAB HG002, Novogene SureSelect V6 exome (github.com/novogene-europe/ngs_demo_datasets) | GIAB v4.2.1 (step 10.2) | genotype-aware `rtg vcfeval` in callable targets ∩ benchmark regions |
 | RNA fusion | HCC1395 bulk RNA-seq SRR9134735, SRR9134709, SRR9134757 (SRA SRP199641) | 138 validated HCC1395 fusions (Zhang et al., 2016) and RNA-supported SVs (Talsania et al., 2022) | `fusion_truth_match.py` (gene pairs in either orientation, HGNC renaming, intergenic gene lists) |
 
-Helper scripts: `make_figures.py` (Figures 2-5, Tables 1-2), `eval_germline.sh`, `fusion_truth_match.py`.
+Helper scripts: `make_figures.py`, `benchmark_plots.py` (Figures 2-5, Tables 1-2), `fusion_truth_match.py`.
 
 ---
 
@@ -1324,9 +1323,8 @@ echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the
 | Symptom | Cause | Solution |
 |---|---|---|
 | Exit 140 | LSF run-time limit | Raise `time` for that process in an extra config (see Running PAPIO) |
-| Exit 141 in `PREFLIGHT_REFERENCES` | `head` closing a pipe under `pipefail` on large VCFs | Fixed in v1.0.0; update the code |
 | Exit 255 in `PREPROCESS_AND_ALIGN_DNA` | fastp stopped on a damaged FASTQ (bwa-mem2 log ends normally) | `gzip -t` both FASTQs; download again (`prefetch` → `vdb-validate` → `fasterq-dump`) |
-| `0 total baseline variants` in vcfeval | Truth FILTER is not PASS and `--all-records` was not used | Set FILTER to PASS in the truth VCF (step 10.1) |
+| `0 total baseline variants` in vcfeval | Truth FILTER is not PASS and `--all-records` was not used | Set FILTER to PASS in the truth VCF (step 10.2 and step 10.3) |
 | Many LOWSUPPORT calls | Tumor depth below `filter_min_tumor_dp` (20), or `call_regions_gz` narrower than the Mutect2 shards | Check coverage; use the padded `call_regions_gz` (step 4.4) |
 | Params ignored | Values in a `-c` config, or `${HOME}` in the params file | Put them in the params YAML with absolute paths |
 | Germline recall far below 0.9 | `germline_scatter_intervals` from another capture kit | Use the shards built for the sample's kit (step 4.3) |
