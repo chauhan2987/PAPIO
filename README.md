@@ -885,7 +885,7 @@ arriba_blacklist:       ${projectDir}/../references/DB_Arriba/arriba_v2.5.1/blac
 arriba_known_fusions:   ${projectDir}/../references/DB_Arriba/arriba_v2.5.1/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz
 arriba_protein_domains: ${projectDir}/../references/DB_Arriba/arriba_v2.5.1/protein_domains_hg38_GRCh38_v2.5.1.gff3
 known_fusions_tsv:      ${projectDir}/../references/DBs_RNA/known_fusions_hg38_GRCh38_v2.5.1.tsv
-use_fusioncatcher:      false
+use_fusioncatcher:      true
 fusioncatcher_db:       ${projectDir}/../references/DBs_Fusion_Catcher/human_v102
 
 # ---------------- LSF ----------------
