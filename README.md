@@ -1338,7 +1338,8 @@ echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the
 
 ## Citation
 
-If you use PAPIO, please cite the protocol and the tools listed in the Containers table. Code and versioned containers: Zenodo DOI [10.5281/zenodo.23176506].
+If you use PAPIO, please cite the protocol and the tools listed in the Containers table. Code and versioned containers:
+https://github.com/chauhan2987/PAPIO, oras://ghcr.io/chauhan2987/papio_containers
 
 ## Contact
 
