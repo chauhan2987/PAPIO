@@ -1074,9 +1074,9 @@ $SX $E/bcftool_cnvkit_vep_snpeff.sif bash -c "set -euo pipefail; cd $T
   bcftools concat -a high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz \
     -Oz -o SEQC2_Truth_v1.2.1.vcf.gz
   bcftools index -f -t SEQC2_Truth_v1.2.1.vcf.gz"
-# evaluation region: padded V6 + UTR targets x SEQC2 high-confidence regions
+# evaluation region: padded V6 + UTR targets X SEQC2 high-confidence regions
 $BEDTOOLS intersect -a $R/ValidationBed/S07604624_Regions.pad100.bed.gz -b $T/High-Confidence_Regions_v1.2.bed \
-  > $R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
+  | sort -k1,1 -k2,2n | $BEDTOOLS merge -i - > $R/ValidationBed/S07604624_Regions_pad100_intersection_SEQC2.bed
 ```
 
 #### 10.3 GIAB HG002 germline, v4.2.1 [Download]
@@ -1144,6 +1144,11 @@ $BCF query -f '%FILTER\n' superset.vcf.gz | tr ';' '\n' \
 
 $BCF view -i 'FILTER~"LowConf"'      superset.vcf.gz -Oz -o lowconf.vcf.gz      && $BCF index -f -t lowconf.vcf.gz
 $BCF view -i 'FILTER~"Unclassified"' superset.vcf.gz -Oz -o unclassified.vcf.gz && $BCF index -f -t unclassified.vcf.gz
+
+$BCF isec -n=2 -w1 truth_somatic.vcf.gz lowconf.vcf.gz      | grep -vc '^#'    # truth sites labelled LowConf
+$BCF isec -n=2 -w1 truth_somatic.vcf.gz unclassified.vcf.gz | grep -vc '^#'    # truth sites labelled Unclassified
+$BCF isec -C -w1 lowconf.vcf.gz      truth_somatic.vcf.gz -Oz -o lowconf.x.vcf.gz      && mv lowconf.x.vcf.gz lowconf.vcf.gz           && $BCF index -f -t lowconf.vcf.gz
+$BCF isec -C -w1 unclassified.vcf.gz truth_somatic.vcf.gz -Oz -o unclassified.x.vcf.gz && mv unclassified.x.vcf.gz unclassified.vcf.gz && $BCF index -f -t unclassified.vcf.gz
 ```
 
 #### ---------- A3. Score one call set ----------
@@ -1160,7 +1165,7 @@ score_somatic () {               # usage: score_somatic <label> <vcf> [bcftools 
   [ -n "$S" ] || { echo "ERROR: no tumor column in $V"; return 1; }
   echo "== $L   tumor column: $S"
 
-  $BCF view -s "$S" "$@" $V | $BCF norm -a --atom-overlaps . -m -any -f $REF | $BCF sort -Oz -o $L.calls.vcf.gz -
+  $BCF view -s "$S" "$@" $V | $BCF norm -a --atom-overlaps . -m -any -f $REF | $BCF sort | $BCF norm -d exact -Oz -o $L.calls.vcf.gz -
   $BCF index -f -t $L.calls.vcf.gz
 
   # (i) novel calls: keep only tumor VAF >= 5%
@@ -1206,7 +1211,7 @@ VARSCAN_INDEL=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_ind
 ```bash
 score_somatic final_pass     $FILT -f PASS     # consensus + VAF/alt reads/depth/normal filters
 score_somatic consensus_pass $CONS -f PASS     # >= 2 callers
-score_somatic consensus_all  $CONS             # all Mutect2 PASS calls (LOWCONSENSUS included)
+score_somatic consensus_all  $CONS             # all consensus records: Mutect2 PASS (incl. LOWCONSENSUS) + rescued union sites
 ```
 
 #### ---------- A6. Each caller before (raw) and after (pass) its own filter (optional) ----------
@@ -1220,8 +1225,8 @@ score_somatic strelka2_raw  strelka2.vcf.gz
 score_somatic strelka2_pass strelka2.vcf.gz -f PASS
 score_somatic muse_raw      $MUSE
 score_somatic muse_pass     $MUSE           -e 'FILTER~"Tier5"'
-score_somatic varscan_raw   varscan.vcf.gz  -i 'INFO/SS=2'
-score_somatic varscan_pass  varscan.vcf.gz  -f PASS -i 'INFO/SS=2'
+score_somatic varscan_raw   varscan.vcf.gz
+score_somatic varscan_pass  varscan.vcf.gz  -i 'INFO/SS=2'
 
 column -t somatic_metrics.tsv
 ```
@@ -1324,7 +1329,7 @@ echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the
 |---|---|---|
 | Exit 140 | LSF run-time limit | Raise `time` for that process in an extra config (see Running PAPIO) |
 | Exit 255 in `PREPROCESS_AND_ALIGN_DNA` | fastp stopped on a damaged FASTQ (bwa-mem2 log ends normally) | `gzip -t` both FASTQs; download again (`prefetch` → `vdb-validate` → `fasterq-dump`) |
-| `0 total baseline variants` in vcfeval | Truth FILTER is not PASS and `--all-records` was not used | Set FILTER to PASS in the truth VCF (step 10.2 and step 10.3) |
+| `0 total baseline variants` in vcfeval | Truth FILTER is not PASS and `--all-records` was not used | Set FILTER to PASS in the truth VCF (benchmark step A1, `awk '{$7="PASS"}'`), or run vcfeval with --all-records |
 | Many LOWSUPPORT calls | Tumor depth below `filter_min_tumor_dp` (20), or `call_regions_gz` narrower than the Mutect2 shards | Check coverage; use the padded `call_regions_gz` (step 4.4) |
 | Params ignored | Values in a `-c` config, or `${HOME}` in the params file | Put them in the params YAML with absolute paths |
 | Germline recall far below 0.9 | `germline_scatter_intervals` from another capture kit | Use the shards built for the sample's kit (step 4.3) |
@@ -1333,7 +1338,7 @@ echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the
 
 ## Citation
 
-If you use PAPIO, please cite the protocol and the tools listed in the Containers table. Code and versioned containers: Zenodo DOI [10.5281/zenodo.23176505].
+If you use PAPIO, please cite the protocol and the tools listed in the Containers table. Code and versioned containers: Zenodo DOI [10.5281/zenodo.23176506].
 
 ## Contact
 
