@@ -100,7 +100,7 @@ The pipeline looks for these files in `envs/` (`container_dir`). The names are s
 | `container_arriba` | `arriba.sif` | Arriba 2.5.1 |
 | `container_starfusion` | `starfusion_fusioninspector_ctat.sif` | STAR-Fusion 1.15.1, FusionInspector 2.10.0, CTAT (GRCh38 GENCODE v44, Oct 2023 plug-n-play)|
 | `container_fusioncatcher` | `fusioncatcher.sif` | FusionCatcher 1.33 |
-| (benchmarking only) | `rtg_tools.sif` | RTG Tools 3.12.1 (vcfeval) |
+| (benchmarking only) | `rtg_tools.sif` | RTG Tools 3.13 (vcfeval) |
 
 ---
 
@@ -148,6 +148,10 @@ for t in gatk bwa_samtools_fastp_fgbio_bcftools bcftool_cnvkit_vep_snpeff msisen
 done
 ```
 
+Download other images using the same approach. These images are:
+annotsv, multiqc_mosdepth_verifybam2, sequenza starfusion_fusioninspector_ctat, strelka2strelka_tag_af, arriba, deepvar_freebayes 
+manta, muse_bcftools, sigprofiler, varscan, fusioncatcher, rtg_tools, somalier, vcf2maf
+
 The images below can also be rebuilt from public sources.
 
 #### 1.1 Single-tool images [Download]
@@ -156,7 +160,6 @@ The images below can also be rebuilt from public sources.
 cd $E
 apptainer pull strelka2.sif      docker://quay.io/biocontainers/strelka:2.9.10--h9ee0642_1
 apptainer pull annotsv.sif       docker://quay.io/biocontainers/annotsv:3.5.3--py313hdfd78af_0
-apptainer pull starfusion.sif    docker://trinityctat/starfusion:1.15.1
 apptainer pull fusioncatcher.sif docker://clinicalgenomics/fusioncatcher:1.33
 apptainer pull rtg_tools.sif     docker://biocontainers/rtg-tools:v3.12.1dfsg-1-deb_cv1
 cd $P
