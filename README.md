@@ -712,6 +712,10 @@ zcat $FQ | head -40000 | awk 'NR%4==2 {n++; for (i=1;i<=15;i++) c[i, substr($0,i
 
 ---
 
+Note: If you have many normal samples (> 30), you can generate your own PON file using separate pipeline (setup scripts included).
+
+
+---
 
 ## Samplesheets
 
