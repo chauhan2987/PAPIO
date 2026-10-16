@@ -1151,10 +1151,27 @@ process SEQUENZA {
         verbose  = TRUE
     )
 
+    # sequenza.extract wraps copynumber segmentation in try(): an unsupported
+    # assembly silently yields ONE segment per chromosome. Stop instead.
+    nseg <- sapply(seqz_data\$segments, nrow)
+    print(nseg)
+    if (all(nseg <= 1))
+        stop("Sequenza produced one segment per chromosome: segmentation failed ",
+             "(the copynumber package must support assembly '", assembly, "')")
+
+    # Sex-chromosome names as they appear in the data (chrX/chrY or X/Y): Sequenza's
+    # default XY = c("X","Y") does not match chrX/chrY, so chrY was fitted in female
+    # samples and a male chrX was treated as diploid.
+    xy_pfx <- if (any(grepl("^chr", seqz_data\$chromosomes))) "chr" else ""
+    XY     <- c(X = paste0(xy_pfx, "X"), Y = paste0(xy_pfx, "Y"))
+    cat("Sex chromosomes:", XY, "\\n")
+
     CP <- sequenza.fit(
         seqz_data,
         cellularity = seq(0.1, 1, 0.01),
-        ploidy      = seq(1, 7, 0.1)
+        ploidy      = seq(1, 7, 0.1),
+        female      = ${female_flag},
+        XY          = XY
     )
 
     sequenza.results(
@@ -1162,7 +1179,8 @@ process SEQUENZA {
         cp.table         = CP,
         sample.id        = prefix,
         out.dir          = ".",
-        female           = ${female_flag}
+        female           = ${female_flag},
+        XY               = XY
     )
     RSCRIPT
 

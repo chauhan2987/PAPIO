@@ -523,6 +523,15 @@ def canon_key(g5, g3):
     a, b = norm_gene(g5), norm_gene(g3)
     return "--".join(sorted([a, b]))       # order-insensitive for matching
 
+def split_pair(line):
+    # Separators: TAB, '--', comma, semicolon, space. A single hyphen is a separator
+    # ONLY when the line has exactly one ('BCR-ABL1'); symbols such as NKX2-1 / HLA-A
+    # contain hyphens, so 'A--B' or TAB is required for those.
+    parts = [p for p in re.split(r'[\\t,; ]+|--', line) if p]
+    if len(parts) == 1 and parts[0].count('-') == 1:
+        parts = parts[0].split('-')
+    return parts
+
 def parse_bp(s):
     # "chr7:55019278:+" or "7:55019278" -> (chrom, pos)
     if not s: return ("", "")
@@ -639,10 +648,11 @@ if KNOWN_PATH != "NONE":
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#"): continue
-                parts = re.split(r'[\\t,;\\- ]+|--', line)
-                parts = [p for p in parts if p]
+                parts = split_pair(line)
                 if len(parts) >= 2:
                     known.add("--".join(sorted([norm_gene(parts[0]), norm_gene(parts[1])])))
+                else:
+                    sys.stderr.write(f"WARN known_fusions: unparsed line (use TAB or '--'): {line}\\n")
     except FileNotFoundError:
         pass
 
@@ -881,6 +891,15 @@ def norm_gene(g):
     g = str(g or "").strip().upper().split('^')[0]
     return re.sub(r'\\(.*?\\)', '', g).strip()
 
+def split_pair(line):
+    # Separators: TAB, '--', comma, semicolon, space. A single hyphen is a separator
+    # ONLY when the line has exactly one ('BCR-ABL1'); symbols such as NKX2-1 / HLA-A
+    # contain hyphens, so 'A--B' or TAB is required for those.
+    parts = [p for p in re.split(r'[\\t,; ]+|--', line) if p]
+    if len(parts) == 1 and parts[0].count('-') == 1:
+        parts = parts[0].split('-')
+    return parts
+
 # CGC gene -> role (col layout matches the DNA CLASSIFY_VARIANTS usage:
 # col1=symbol, col15=role_in_cancer). Robust to header presence.
 role = {}
@@ -904,7 +923,7 @@ if KNOWN_PATH != "NONE":
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#"): continue
-                parts = [p for p in re.split(r'[\\t,;\\- ]+|--', line) if p]
+                parts = split_pair(line)
                 if len(parts) >= 2:
                     known.add("--".join(sorted([norm_gene(parts[0]), norm_gene(parts[1])])))
     except FileNotFoundError:
