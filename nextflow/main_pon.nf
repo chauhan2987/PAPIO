@@ -4,10 +4,10 @@ nextflow.enable.dsl = 2
 // ============================================================
 //  main_pon.nf  -  Standalone Germline Panel-of-Normals (PON) builder
 //
-//  Deliberately NOT wired into main_v3.nf: building a PON is a one-time (or
+//  Deliberately NOT wired into main.nf: building a PON is a one-time (or
 //  occasional) reference-curation task, not a per-patient clinical run - it
 //  has its own samplesheet shape (normal BAMs only, no patient/tumor pairing)
-//  and shouldn't share main_v3's assay/stage-gating machinery. Run it once,
+//  and shouldn't share main's assay/stage-gating machinery. Run it once,
 //  publish panel_of_normals.vcf.gz, then point params.panel_of_normals at it
 //  for every future somatic MUTECT2 run.
 //
