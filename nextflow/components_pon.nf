@@ -135,6 +135,7 @@ process PON_GENOMICSDB_IMPORT {
     gatk --java-options "${java_opts}" GenomicsDBImport \\
         -R ${ref_fasta} \\
         -L ${interval_file} \\
+        --merge-input-intervals \\
         --genomicsdb-workspace-path pon_db_${interval_name} \\
         --batch-size ${batch_size} \\
         --tmp-dir "\$tmp_dir" \\

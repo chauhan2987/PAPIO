@@ -4,9 +4,6 @@ envs
 # References die
 references
 
-# PON pipeline
-*pon*
-
 # patch files
 *patch*
 
