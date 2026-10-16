@@ -4,9 +4,6 @@ envs
 # References die
 references
 
-# PON pipeline
-*pon*
-
 # patch files
 *patch*
 
@@ -15,7 +12,6 @@ Log
 
 # Notes 
 Notes.md
-*.py
 
 # container url generator
 wave
@@ -40,7 +36,6 @@ Logs
 # ---- Pipeline code and helper scripts must always be tracked ----
 # "*pon*" above also matches "components", and "*.py" above also matches the helper scripts.
 # Re-include them here (these lines must stay at the end of the file).
-!nextflow/components_*.nf
 !make_refflat.py
 !fusion_truth_match.py
 !make_figures.py

@@ -124,7 +124,7 @@ BCF="$SX $E/bwa_samtools_fastp_fgbio_bcftools.sif"
 GATK="$SX $E/gatk.sif"
 mkdir -p $U $R/{GRCh38,BostonGeneBed,ValidationBed,DBs_SNP_Indels,DBs_Somatic_VCFs,DBs_Germline_VCFs,DBs_Annot} \
          $R/{DBs_Analytic_Metrics,DB_VEP_Cache,DBs_AnnotSV,DBs_RNA,DBs_CTAT,DB_Arriba,DBs_Fusion_Catcher} \
-         $R/{RefFlat,RNA_Intervals_Dir,DBs_gCNV/scatter_flat,truth_data} $E
+         $R/{RefFlat,RNA_Intervals_Dir,DBs_gCNV,truth_data} $E
 ```
 
 Long steps (bwa-mem2 index, STAR index, VEP cache) need an interactive LSF session:
@@ -149,8 +149,7 @@ done
 ```
 
 Download other images using the same approach. These images are:
-annotsv, multiqc_mosdepth_verifybam2, sequenza starfusion_fusioninspector_ctat, strelka2strelka_tag_af, arriba, deepvar_freebayes 
-manta, muse_bcftools, sigprofiler, varscan, fusioncatcher, rtg_tools, somalier, vcf2maf
+annotsv, multiqc_mosdepth_verifybam2, sequenza, starfusion_fusioninspector_ctat, strelka2, strelka_tag_af, arriba, deepvar_freebayes, manta, muse_bcftools, sigprofiler, varscan, fusioncatcher, rtg_tools, somalier, vcf2maf
 
 The images below can also be rebuilt from public sources.
 
@@ -161,7 +160,6 @@ cd $E
 apptainer pull strelka2.sif      docker://quay.io/biocontainers/strelka:2.9.10--h9ee0642_1
 apptainer pull annotsv.sif       docker://quay.io/biocontainers/annotsv:3.5.3--py313hdfd78af_0
 apptainer pull fusioncatcher.sif docker://clinicalgenomics/fusioncatcher:1.33
-apptainer pull rtg_tools.sif     docker://biocontainers/rtg-tools:v3.12.1dfsg-1-deb_cv1
 cd $P
 ```
 
@@ -340,6 +338,24 @@ $GATK gatk ValidateVariants -V $F -R $REF --validation-type-to-exclude ALL
 
 ---
 
+#### 3.4 In-house Mutect2 panel of normals (optional) [Generate]
+
+The public `1000g_pon` above is the panel of normals used throughout this protocol. A panel built from your own
+normals on the same capture kit can also remove recurrent artefacts specific to that kit. `main_pon.nf` builds a panel
+from final normal BAMs (sample_id,bam,bai): it runs Mutect2 tumour-only on each normal over `scatter_intervals`, then
+GenomicsDBImport and CreateSomaticPanelOfNormals with `germline_resource`.
+
+```bash
+nextflow run main_pon.nf -c project.config -c pon.config \
+    -profile production --pon_samplesheet normals.csv
+```
+
+- This is a Mutect2 (somatic) panel of normals, like `1000g_pon`; keep it in `DBs_Somatic_VCFs`.
+- The workflow is optional, is not part of this protocol, and was not used for any result in the paper.
+- Its output is derived from patients' germline data: do not commit or share it without approval.
+
+---
+
 ### 4. Capture intervals
 
 Design BEDs come from Agilent SureDesign (login required): https://earray.chem.agilent.com/suredesign/
@@ -367,7 +383,7 @@ SOM_SHARDS=$R/Validation_Scatter_Intervals_Dir_V6_pad100; GERM_SHARDS=$R/Validat
 
 # --- own data: SureSelect V7 (S31285117) ---
 # K=$R/BostonGeneBed;  ID=S31285117; PROBES=$K/S31285117_MergedProbes.bed
-# BAITS=$K/MergedProbes.interval_list;  TARGETS=$K/Regions.interval_list
+# BAITS=$K/Baits_MergedProbes_V7.interval_list;  TARGETS=$K/Targets_Regions_V7.interval_list
 # SOM_SHARDS=$R/Scatter_Intervals_Dir_V7_pad100;            GERM_SHARDS=$R/Germline_Scatter_150_V7_pad100
 ```
 
@@ -417,10 +433,10 @@ Params YAML entries for the two kits:
 |---|---|---|
 | `interval_bed` | `ValidationBed/S07604624_Regions.bed` | `BostonGeneBed/S31285117_Regions.bed` |
 | `call_regions_gz` | `ValidationBed/S07604624_Regions.pad100.bed.gz` | `BostonGeneBed/S31285117_Regions.pad100.bed.gz` |
-| `bait_interval_list` | `ValidationBed/Covered_Baits.interval_list` | `BostonGeneBed/MergedProbes.interval_list` |
-| `target_interval_list` | `ValidationBed/Targets_Regions.interval_list` | `BostonGeneBed/Regions.interval_list` |
+| `bait_interval_list` | `ValidationBed/Covered_Baits.interval_list` | `BostonGeneBed/Baits_MergedProbes_V7.interval_list` |
+| `target_interval_list` | `ValidationBed/Targets_Regions.interval_list` | `BostonGeneBed/Targets_Regions_V7.interval_list` |
 | `scatter_intervals` | `Validation_Scatter_Intervals_Dir_V6_pad100` | `Scatter_Intervals_Dir_V7_pad100` |
-| `germline_scatter_intervals` | `Validation_Germline_Scatter_150_V6_pad100` | `Germline_Scatter_150_pad100` |
+| `germline_scatter_intervals` | `Validation_Germline_Scatter_150_V6_pad100` | `Germline_Scatter_150_V7_pad100` |
 
 ---
 
@@ -437,15 +453,21 @@ $SX $E/msisensorpro.sif msisensor-pro scan -d $REF -o $R/DBs_Somatic_VCFs/msisen
 
 ```bash
 G=$R/DBs_gCNV
-GCNV_BED=$R/ValidationBed/S07604624_Regions.bed          # demonstration kit
+GCNV_BED=$R/ValidationBed/S07604624_Regions.bed          # demonstration data is < 30 so it is not needed
 # GCNV_BED=$R/BostonGeneBed/S31285117_Regions.bed        # own data (V7)
+ID='S07604624'
+mkdir -p $G/${ID}_scatter_flat
+
 $GATK gatk PreprocessIntervals -R $REF -L $GCNV_BED \
-  --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O $G/preprocessed_intervals.interval_list
-$GATK gatk AnnotateIntervals -R $REF -L $G/preprocessed_intervals.interval_list \
-  --interval-merging-rule OVERLAPPING_ONLY -O $G/annotated_intervals.tsv
-$GATK gatk IntervalListTools --INPUT $G/preprocessed_intervals.interval_list \
-  --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT $G/scatter
-i=0; for d in $G/scatter/temp_*; do i=$((i+1)); printf -v n '%04d' $i; cp "$d/scattered.interval_list" "$G/scatter_flat/shard_${n}.interval_list"; done
+  --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O $G/${ID}_preprocessed_intervals.interval_list
+$GATK gatk AnnotateIntervals -R $REF -L $G/${ID}_preprocessed_intervals.interval_list \
+  --interval-merging-rule OVERLAPPING_ONLY -O $G/${ID}_annotated_intervals.tsv
+$GATK gatk IntervalListTools --INPUT $G/${ID}_preprocessed_intervals.interval_list \
+  --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT $G/${ID}_scatter
+i=0; for d in $G/${ID}_scatter/temp_*; do i=$((i+1)); printf -v n '%04d' $i; cp "$d/scattered.interval_list" "$G/${ID}_scatter_flat/shard_${n}.interval_list"; done
+
+rm -rf $G/${ID}_scatter
+
 awk 'BEGIN{OFS="\t"; print "CONTIG_NAME","PLOIDY_PRIOR_0","PLOIDY_PRIOR_1","PLOIDY_PRIOR_2","PLOIDY_PRIOR_3"
   for (i=1;i<=22;i++) print "chr"i,"0.01","0.01","0.97","0.01"
   print "chrX","0.01","0.49","0.49","0.01"; print "chrY","0.495","0.495","0.01","0.01"}' > $G/contig_ploidy_priors.tsv
@@ -710,10 +732,6 @@ zcat $FQ | head -40000 | awk 'NR%4==2 {n++; for (i=1;i<=15;i++) c[i, substr($0,i
        100*c[i,"A"]/n, 100*c[i,"C"]/n, 100*c[i,"G"]/n, 100*c[i,"T"]/n}'
 ```
 
----
-
-Note: If you have many normal samples (> 30), you can generate your own PON file using separate pipeline (setup scripts included).
-
 
 ---
 
@@ -816,7 +834,6 @@ call_regions_gz:        ${projectDir}/../references/ValidationBed/S07604624_Regi
 bait_interval_list:     ${projectDir}/../references/ValidationBed/Covered_Baits.interval_list
 target_interval_list:   ${projectDir}/../references/ValidationBed/Targets_Regions.interval_list
 
-
 # ---------------- Capture: own data = SureSelect V7 (S31285117) ----------------
 # (reconciled to d1.vd1; need .tbi)
 # interval_bed:           ${projectDir}/../references/BostonGeneBed/S31285117_Regions.bed
@@ -835,7 +852,6 @@ somalier_sites:         ${projectDir}/../references/DBs_Somatic_VCFs/somalier_hg
 verifybamid_db:         null
 coverage_report_bed:    ${projectDir}/../references/DBs_Analytic_Metrics/reportable_genes_MANE_CDS.bed
 
-
 # ---------------- Annotation (both DNA arms) ----------------
 vep_cache_dir:          ${projectDir}/../references/DB_VEP_Cache
 vep_plugins_dir:        null
@@ -843,15 +859,14 @@ clinvar_vcf:            ${projectDir}/../references/DBs_Annot/clinvar_chr.vcf.gz
 annotsv_dir:            ${projectDir}/../references/DBs_AnnotSV
 cosmic_cgc_tsv:         ${projectDir}/../references/DBs_Annot/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz
 
-
 # ------------ Somatic arm (analysis: somatic) ----------------
 scatter_intervals:      ${projectDir}/../references/Validation_Scatter_Intervals_Dir_V6_pad100
+# scatter_intervals:      ${projectDir}/../references/Scatter_Intervals_Dir_V7_pad100 (own data)
 germline_resource:      ${projectDir}/../references/DBs_Somatic_VCFs/af-only-gnomad.d1vd1.vcf.gz
-# scatter_intervals:      ${projectDir}/../references/Scatter_Intervals_Dir_V7_pad100
 pileup_variants:        ${projectDir}/../references/DBs_Somatic_VCFs/small_exac_common_3.d1vd1.vcf.gz
-# Choose either 1000G PON or your custom PON for RCC
+# Choose either 1000G PON or your custom PON
 panel_of_normals:       ${projectDir}/../references/DBs_Somatic_VCFs/1000g_pon.d1vd1.vcf.gz
-# panel_of_normals:     ${projectDir}/../references/DBs_Germline_VCFs/Kidney_Can_PON.vcf.gz   # own data: in-house PON
+# panel_of_normals:     /path/to/inhouse_pon.vcf.gz   # optional: built with main_pon.nf (section 3.4)
 orientation_bias:       true
 cnvkit_pon:             null
 msisensor_list:         ${projectDir}/../references/DBs_Somatic_VCFs/msisensor_scan.list
@@ -864,21 +879,22 @@ germline_on_normals:    false     # true = germline report for each matched norm
 
 # ------------ Germline arm (analysis: germline) ----------------
 germline_scatter_intervals: ${projectDir}/../references/Validation_Germline_Scatter_150_V6_pad100
-# germline_scatter_intervals: ${projectDir}/../references/Germline_Scatter_150_pad100
+# germline_scatter_intervals: ${projectDir}/../references/Germline_Scatter_150_V7_pad100
 germline_caller:        haplotypecaller   # haplotypecaller | deepvariant
 germline_filter:        nv                # nv (any sample number NVScoreVariants) | vqsr (>= 30 samples)
 vqsr_min_samples:       30  # minimum samples before VQSR is allowed (else use 'nv')
 run_gcnv:               false             # true only with >= 30 normals of one kit
 gcnv_min_samples:       30
-germline_ba1_af:         0.05
+germline_ba1_af:        0.05
 hapmap:                 ${projectDir}/../references/DBs_Germline_VCFs/hapmap_3.3.d1vd1.vcf.gz
 omni:                   ${projectDir}/../references/DBs_Germline_VCFs/1000g_omni2.5.d1vd1.vcf.gz
 thousandg_snps:         ${projectDir}/../references/DBs_Germline_VCFs/1000g_phase1_snps_high_conf.d1vd1.vcf.gz
 germline_report_genes:  ${projectDir}/../references/DBs_Analytic_Metrics/reportable_genes.txt
-preprocessed_intervals:   ${projectDir}/../references/DBs_gCNV/preprocessed_intervals.interval_list
-contig_ploidy_priors:     ${projectDir}/../references/DBs_gCNV/contig_ploidy_priors.tsv
-gcnv_scatter_intervals:   ${projectDir}/../references/DBs_gCNV/scatter_flat
-gcnv_annotated_intervals: ${projectDir}/../references/DBs_gCNV/annotated_intervals.tsv
+# if >= 30 normals and run_gcnv is true (not used since demo data < 30 normals)
+# contig_ploidy_priors:     ${projectDir}/../references/DBs_gCNV/contig_ploidy_priors.tsv
+# preprocessed_intervals:   ${projectDir}/../references/DBs_gCNV/S31285117_preprocessed_intervals.interval_list
+# gcnv_scatter_intervals:   ${projectDir}/../references/DBs_gCNV/S31285117_scatter_flat
+# gcnv_annotated_intervals: ${projectDir}/../references/DBs_gCNV/S31285117_annotated_intervals.tsv
 
 # ---------------- RNA fusion arm(analysis: rna_fusion) ----------------
 rna_use_ctat_reference: false

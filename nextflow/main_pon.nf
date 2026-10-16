@@ -2,13 +2,13 @@
 nextflow.enable.dsl = 2
 
 // ============================================================
-//  main_pon.nf  -  Standalone Germline Panel-of-Normals (PON) builder
+//  main_pon.nf  -  Standalone Mutect2 (somatic) Panel-of-Normals (PON) builder
 //
 //  Deliberately NOT wired into main.nf: building a PON is a one-time (or
 //  occasional) reference-curation task, not a per-patient clinical run - it
 //  has its own samplesheet shape (normal BAMs only, no patient/tumor pairing)
 //  and shouldn't share main's assay/stage-gating machinery. Run it once,
-//  publish panel_of_normals.vcf.gz, then point params.panel_of_normals at it
+//  publish inhouse_pon.vcf.gz, then point params.panel_of_normals at it
 //  for every future somatic MUTECT2 run.
 //
 //  Run:
@@ -19,9 +19,6 @@ nextflow.enable.dsl = 2
 //    sample_id,bam,bai
 //    S001_N,/path/S001_N.bam,/path/S001_N.bam.bai
 //    S002_N,/path/S002_N.bam,/path/S002_N.bam.bai
-//    ...
-//  Use FINAL (post-BQSR) normal BAMs from the DNA germline/somatic arm -
-//  do not re-align here; this module only calls + combines.
 // ============================================================
 
 include { gatkJavaOpts } from './utils'

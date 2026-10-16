@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 // ============================================================
-//  main.nf  -  Pipeline Entry Point   (STRICT DSL2 / Nextflow 25+/26+)
+//  main.nf  -  Pipeline Entry Point   (STRICT DSL2 )
 //
 //  Strict-syntax rules honoured here:
 //    - NO executable statements at top level. Only includes, function
@@ -10,7 +10,7 @@
 //      NOT as top-level `params.x = ...` assignments.
 //    - Constants and validation logic are FUNCTIONS, called from workflow{}.
 //
-//  Responsibilities (unchanged): validate params, log a run summary,
+//  Responsibilities: validate params, log a run summary,
 //  route to the DNA workflow.
 // ============================================================
 
