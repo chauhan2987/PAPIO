@@ -12,8 +12,8 @@ nextflow.enable.dsl = 2
 //  for every future somatic MUTECT2 run.
 //
 //  Run:
-//    nextflow run main_pon.nf -c project.config -c pon.config \
-//        -profile production --pon_samplesheet normals.csv
+//    nextflow run main_pon.nf -c pon.config -params-file params_pon.yaml\
+//        -profile production
 //
 //  Input samplesheet (simple, 3 columns):
 //    sample_id,bam,bai
