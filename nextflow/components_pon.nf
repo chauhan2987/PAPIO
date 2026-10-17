@@ -2,21 +2,7 @@
 nextflow.enable.dsl = 2
 
 // ============================================================
-//  components_pon.nf  -  Germline Panel-of-Normals (PON) creation
-//
-//  Implements GATK's official 3-step PON recipe verbatim (Broad Institute
-//  CreateSomaticPanelOfNormals docs / Mutect2 tutorial notebook):
-//    1) Mutect2 in TUMOR-ONLY mode on each normal BAM, --max-mnp-distance 0
-//       (REQUIRED since May 2019 - avoids a GenomicsDBImport bug on MNPs)
-//    2) GenomicsDBImport across all per-normal VCFs, over the target intervals
-//    3) CreateSomaticPanelOfNormals from the GenomicsDB (+ gnomAD germline
-//       resource, so likely-germline sites are excluded from the PON -
-//       germline filtering belongs to Mutect2's --germline-resource model,
-//       not the PON; see --max-germline-probability, default 0.5)
-//
-//  Scatter/gather shape mirrors the existing somatic MUTECT2/MERGE_MUTECT2
-//  pair exactly (same scatter_intervals dir, same tag/label/pubDir/gatkJavaOpts
-//  idiom) - this is the SAME tool run in a different mode, not new machinery.
+//  components_pon.nf  -   Standalone Mutect2 (somatic) Panel-of-Normals (PON) builder
 // ============================================================
 
 include { gatkJavaOpts; pubDir } from './utils'
