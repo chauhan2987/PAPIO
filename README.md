@@ -1,12 +1,14 @@
 # PAPIO - Pan-omic Analysis PIpeline for Oncology (v1.0.0)
 
 PAPIO is a Nextflow DSL2 workflow for tumor exome and RNA sequencing. From FASTQ files it produces
-germline variants, somatic SNVs and indels (four-caller consensus), copy number and LOH with purity and ploidy,
+germline variants, somatic SNVs and indels (Mutect2 calls corroborated by Strelka2, MuSE and VarScan2), copy number and LOH with purity and ploidy,
 structural variants, microsatellite instability, tumor mutational burden and RNA gene fusions, with
 per-sample QC and one consolidated report per patient. It runs on an HPC cluster (LSF) with Singularity/Apptainer images.
 
 This README covers installation, reference preparation, inputs, running the pipeline and its outputs.
 The demonstration data use the Agilent SureSelect V6 + UTR exome kit (SEQC2 HCC1395/HCC1395BL, GIAB HG002);
+settings for SureSelect V7, used for our own RCC cohort, are shown as commented alternatives.
+
 ---
 
 ## Contents
@@ -60,8 +62,14 @@ Typical run time for one tumor-normal exome pair: about 3.5 h wall clock and abo
 ```
 genomics_pipeline/
 |-- nextflow/                 # pipeline code (main.nf, nextflow.config, workflows_*.nf, components_*.nf, utils.nf)
+|                             #   optional PON builder: main_pon.nf + pon.config (section 3.4)
+|-- make_figures.py           # Figures 2 and 4 (step D)
+|-- benchmark_plots.py        # Figures 3 and 5 (step D)
+|-- trace_table.py            # Table 1, resource use (step D)
+|-- fusion_truth_match.py     # fusion calls vs a published list (step C)
+|-- make_refflat.py           # refFlat for Picard RNA metrics (section 8.6)
 |-- envs/                     # Singularity images (*.sif)
-|-- references/               # reference data (section 5)
+|-- references/               # reference data (see "Reference resources")
 |-- README.md
 ```
 
@@ -233,7 +241,7 @@ EOF
 cat > Dockerfile <<'EOF'
 FROM condaforge/mambaforge:latest
 RUN mamba create -y -n vcf2maf -c conda-forge -c bioconda \
-    vcf2maf=1.6.21 samtools=1.23.1 htslib=1.23.1 \
+    vcf2maf=1.6.22 samtools=1.23.1 htslib=1.23.1 \
     && mamba clean -afy
 ENV PATH="/opt/conda/envs/vcf2maf/bin:${PATH}"
 ENV LC_ALL=C.UTF-8 LANG=C.UTF-8
@@ -341,19 +349,49 @@ $GATK gatk ValidateVariants -V $F -R $REF --validation-type-to-exclude ALL
 #### 3.4 In-house Mutect2 panel of normals (optional) [Generate]
 
 The public `1000g_pon` above is the panel of normals used throughout this protocol. A panel built from your own
-normals on the same capture kit can also remove recurrent artefacts specific to that kit. `main_pon.nf` builds a panel
-from final normal BAMs (sample_id,bam,bai): it runs Mutect2 tumour-only on each normal over `scatter_intervals`, then
+normals on the same capture kit can also remove recurrent artifacts specific to that kit. `main_pon.nf` builds a panel
+from final normal BAMs: it runs Mutect2 tumor-only on each normal over `scatter_intervals`, then
 GenomicsDBImport and CreateSomaticPanelOfNormals with `germline_resource`.
+
+Samplesheet (normal BAMs only):
+
+```
+sample_id,bam,bai
+S001_N,/path/S001_N.bam,/path/S001_N.bam.bai
+S002_N,/path/S002_N.bam,/path/S002_N.bam.bai
+```
+
+`params_pon.yaml` (same conventions as `params_demo.yaml` in "Parameter file"; V7 shards shown):
+
+```yaml
+pon_samplesheet:    /home/<user>/normals_pon.csv
+container_dir:      /home/<user>/genomics_pipeline/envs
+work_root:          /scratch/<user>/work_pon
+outdir:             /home/<user>/Result_pon
+bind_paths:         [/home/<user>, /scratch/<user>]
+ref_fasta:          ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.fa
+ref_fai:            ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.fa.fai
+ref_dict:           ${projectDir}/../references/GRCh38/GRCh38.d1.vd1.dict
+scatter_intervals:  ${projectDir}/../references/Scatter_Intervals_Dir_V7_pad100
+germline_resource:  ${projectDir}/../references/DBs_Somatic_VCFs/af-only-gnomad.d1vd1.vcf.gz
+lsf_queue_short:    short
+lsf_queue_medium:   medium
+lsf_queue_high:     long
+lsf_queue_long:     long
+lsf_project:        null
+```
 
 ```bash
 nextflow run ${HOME}/genomics_pipeline/nextflow/main_pon.nf -c ${HOME}/genomics_pipeline/nextflow/pon.config \
  -params-file params_pon.yaml -profile production
 ```
 
+- The panel is written to `<outdir>/00_reference/final_pon/panel_of_normals.vcf.gz` (with `.tbi`). Copy both to
+  `references/DBs_Somatic_VCFs/` as `inhouse_pon.vcf.gz` and `inhouse_pon.vcf.gz.tbi`, then set `panel_of_normals` to that file.
 - This is a Mutect2 (somatic) panel of normals, like `1000g_pon`; keep it in `DBs_Somatic_VCFs`.
 - The workflow is optional, is not part of this protocol, and was not used for any result in the paper.
-- Its output is derived from patients' germline data: do not commit or share it without approval.
-- Make `params_pon.yaml` similar to demo file `params_demo.yaml` explained later. 
+- The panel and the per-normal VCFs in `<outdir>/00_reference/pon/per_normal/` are derived from patients' germline
+  data: do not commit or share them without approval.
 
 ---
 
@@ -839,8 +877,8 @@ target_interval_list:   ${projectDir}/../references/ValidationBed/Targets_Region
 # (reconciled to d1.vd1; need .tbi)
 # interval_bed:           ${projectDir}/../references/BostonGeneBed/S31285117_Regions.bed
 # call_regions_gz:        ${projectDir}/../references/BostonGeneBed/S31285117_Regions.pad100.bed.gz
-# bait_interval_list:     ${projectDir}/../references/BostonGeneBed/MergedProbes.interval_list
-# target_interval_list:   ${projectDir}/../references/BostonGeneBed/Regions.interval_list
+# bait_interval_list:     ${projectDir}/../references/BostonGeneBed/Baits_MergedProbes_V7.interval_list
+# target_interval_list:   ${projectDir}/../references/BostonGeneBed/Targets_Regions_V7.interval_list
 
 # ---------------- Known sites (BQSR, germline) ----------------
 # (reconciled to d1.vd1; need .tbi)
@@ -1057,11 +1095,12 @@ Check the exact top-level folder names with `ls <outdir>` after the first run.
 
 | Arm | Data | Truth set | Comparison |
 |---|---|---|---|
-| Somatic | SEQC2 HCC1395 (SRR7890883) / HCC1395BL (SRR7890874), SureSelect V6 + UTR; SRA SRP162370 | SEQC2 v1.2.1 high-confidence SNVs/indels and regions (step 10.2) | `rtg vcfeval --sample ALT` on site-only VCFs, SNVs and indels separately; LowConf/Unclassified/REJECT sites and novel calls < 5% VAF excluded |
+| Somatic | SEQC2 HCC1395 (SRR7890883) / HCC1395BL (SRR7890874), SureSelect V6 + UTR; SRA SRP162370 | SEQC2 v1.2.1 high-confidence SNVs/indels and regions (step 10.2) | `rtg vcfeval --sample ALT` on site-only VCFs, SNVs and indels separately; calls at LowConf/Unclassified superset sites and novel calls < 5% VAF excluded |
 | Germline | GIAB HG002, Novogene SureSelect V6 exome (github.com/novogene-europe/ngs_demo_datasets) | GIAB v4.2.1 (step 10.3) | genotype-aware `rtg vcfeval` in callable targets ∩ benchmark regions |
-| RNA fusion | HCC1395 bulk RNA-seq SRR9134735, SRR9134709, SRR9134757 (SRA SRP199641) | 138 validated HCC1395 fusions (Zhang et al., 2016) and RNA-supported SVs (Talsania et al., 2022) | `fusion_truth_match.py` (gene pairs in either orientation, HGNC renaming, intergenic gene lists) |
+| RNA fusion | HCC1395 bulk RNA-seq SRR9134735 (SRA SRP199641) | Fusion genes of the RNA-supported SVs of Talsania et al., 2022 (Additional file 9; 24 entries, 23 distinct events) | `fusion_truth_match.py` (gene pairs in either orientation, HGNC renaming, intergenic gene lists) |
 
-Helper scripts: `make_figures.py`, `benchmark_plots.py` (Figures 2-5, Tables 1-2), `fusion_truth_match.py`.
+Helper scripts: `make_figures.py` (Figures 2 and 4), `benchmark_plots.py` (Figures 3 and 5), `trace_table.py` (Table 1)
+and `fusion_truth_match.py` (step C); commands in step D. Table 2 is `somatic_metrics.tsv` (steps A5-A6).
 
 ---
 
@@ -1117,8 +1156,8 @@ wget -c -P $R/truth_data $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz $GB/HG002
 #### =================  Benchmark your calls =================
 
 ```bash
-OUT_S=$DATA/Result_valid_8_Oct_26_som          # <<< outdir of the SEQC2 somatic run
-OUT_G=$DATA/Result_valid_8_Oct_26_germ                 # <<< outdir of the HG002 germline run
+OUT_S=$DATA/Result_valid_17_Oct_26_som          # <<< outdir of the SEQC2 somatic run
+OUT_G=$DATA/Result_valid_17_Oct_26_germ                 # <<< outdir of the HG002 germline run
 
 HEADER="callset\ttype\ttruth\tTP\tFP\tFN\trecall\tprecision\tF1"
 ```
@@ -1231,7 +1270,7 @@ VARSCAN_SNV=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_snv.a
 VARSCAN_INDEL=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_indel.af.vcf.gz                              # <<<
 ```
 
-#### ---------- A5. Final call set (Table 1) and consensus ----------
+#### ---------- A5. Final call set (Table 2) and consensus ----------
 
 ```bash
 score_somatic final_pass     $FILT -f PASS     # consensus + VAF/alt reads/depth/normal filters
@@ -1239,7 +1278,7 @@ score_somatic consensus_pass $CONS -f PASS     # >= 2 callers
 score_somatic consensus_all  $CONS             # all consensus records: Mutect2 PASS (incl. LOWCONSENSUS) + rescued union sites
 ```
 
-#### ---------- A6. Each caller before (raw) and after (pass) its own filter (optional) ----------
+#### ---------- A6. Each caller before (raw) and after (pass) its own filter (needed for Figure 3 and Table 2) ----------
 
 ```bash
 $BCF concat -a $STRELKA_SNV $STRELKA_INDEL | $BCF sort -Oz -o strelka2.vcf.gz - && $BCF index -f -t strelka2.vcf.gz
@@ -1306,7 +1345,7 @@ column -t germline_metrics.tsv
 #### ---------------- C. RNA FUSION - HCC1395 RNA-seq vs Talsania et al. 2022 fusion list ----------------
 
 ```bash
-OUT_R=$DATA/Result_valid_8_Oct_26_som                                    # <<< outdir of the RNA fusion run
+OUT_R=$DATA/Result_valid_17_Oct_26_rna                                    # <<< outdir of the RNA fusion run
 SCRIPT=$PIPE/fusion_truth_match.py                       # <<< where you keep the script
 TRUTH=$T/Talsania_2022_Add_File9.csv                      # <<< Talsania Additional file 9, saved as CSV
 mkdir -p $OUT_R/benchmark && cd $OUT_R/benchmark
@@ -1346,6 +1385,25 @@ total=$(grep -v '^#' $CALLS | tail -n +2 | wc -l)
 matched=$(awk -F'\t' 'NR>1 && $4=="FOUND"{print $5}' fusion_truth_result.tsv | sort -u | wc -l)
 echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the list: $((total - matched))"
 ```
+
+#### ---------------- D. Figures and tables ----------------
+
+Needs Python 3 with pandas, numpy and matplotlib. Figure 3 uses the rows written by steps A5 and A6.
+
+```bash
+mkdir -p $DATA/figures && cd $DATA/figures
+python3 $PIPE/make_figures.py qc  --results $OUT_S --tumor valid1_T --normal valid1_N -o Figure2
+python3 $PIPE/make_figures.py cnv --results $OUT_S --tumor valid1_T -o Figure4
+python3 $PIPE/benchmark_plots.py somatic  --somatic $OUT_S/benchmark/somatic_metrics.tsv -o Figure3
+python3 $PIPE/benchmark_plots.py combined --germline $OUT_G/benchmark/germline_metrics.tsv \
+                                          --fusion $OUT_R/benchmark/fusion_truth_result.tsv -o Figure5
+python3 $PIPE/trace_table.py $OUT_S/pipeline_trace.txt -o Table1_somatic.tsv      # Table 1, one block per run
+python3 $PIPE/trace_table.py $OUT_G/pipeline_trace.txt -o Table1_germline.tsv
+python3 $PIPE/trace_table.py $OUT_R/pipeline_trace.txt -o Table1_rna.tsv
+```
+
+Table 2 is `$OUT_S/benchmark/somatic_metrics.tsv` (steps A5-A6).
+
 ---
 
 ## Troubleshooting
@@ -1369,4 +1427,3 @@ https://github.com/chauhan2987/PAPIO, oras://ghcr.io/chauhan2987/papio_container
 ## Contact
 
 Pankaj K. Chauhan - PKChauhan@mdanderson.org
-
