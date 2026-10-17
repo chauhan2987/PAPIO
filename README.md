@@ -346,13 +346,14 @@ from final normal BAMs (sample_id,bam,bai): it runs Mutect2 tumour-only on each 
 GenomicsDBImport and CreateSomaticPanelOfNormals with `germline_resource`.
 
 ```bash
-nextflow run main_pon.nf -c project.config -c pon.config \
-    -profile production --pon_samplesheet normals.csv
+nextflow run ${HOME}/genomics_pipeline/nextflow/main_pon.nf -c ${HOME}/genomics_pipeline/nextflow/pon.config \
+ -params-file params_pon.yaml -profile production
 ```
 
 - This is a Mutect2 (somatic) panel of normals, like `1000g_pon`; keep it in `DBs_Somatic_VCFs`.
 - The workflow is optional, is not part of this protocol, and was not used for any result in the paper.
 - Its output is derived from patients' germline data: do not commit or share it without approval.
+- Make `params_pon.yaml` similar to demo file `params_demo.yaml` explained later. 
 
 ---
 
@@ -891,6 +892,7 @@ omni:                   ${projectDir}/../references/DBs_Germline_VCFs/1000g_omni
 thousandg_snps:         ${projectDir}/../references/DBs_Germline_VCFs/1000g_phase1_snps_high_conf.d1vd1.vcf.gz
 germline_report_genes:  ${projectDir}/../references/DBs_Analytic_Metrics/reportable_genes.txt
 # if >= 30 normals and run_gcnv is true (not used since demo data < 30 normals)
+# Below parameters are prepared for own data using SureSelect V7 (S31285117)
 # contig_ploidy_priors:     ${projectDir}/../references/DBs_gCNV/contig_ploidy_priors.tsv
 # preprocessed_intervals:   ${projectDir}/../references/DBs_gCNV/S31285117_preprocessed_intervals.interval_list
 # gcnv_scatter_intervals:   ${projectDir}/../references/DBs_gCNV/S31285117_scatter_flat
