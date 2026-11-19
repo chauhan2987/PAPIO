@@ -4,11 +4,12 @@ nextflow.enable.dsl = 2
 // Shared JVM-options helper.
 include { gatkJavaOpts; pubDir; umiLeadingSkip} from './utils'
 // ============================================================
-//  components.nf  -  All Process Definitions
+//  components_common.nf  -  Processes shared by the DNA arms (and some by RNA)
 // ============================================================
 
+
 // ============================================================
-//  STAGE 0A: Run manifest (per-sample audit record)
+//  STAGE 0 setup: MANIFEST_ROW - run manifest - one audit row per sample
 //
 //  Records each sample's identity, T/N type, sex, assay, batch, input
 //  file, size, and (optionally) a checksum, consolidated into one
@@ -16,6 +17,7 @@ include { gatkJavaOpts; pubDir; umiLeadingSkip} from './utils'
 //  default), 'header' (BAM header md5 - light, provenance), or 'full'
 //  (whole-file md5 - audit-grade chain-of-custody, expensive on large BAMs).
 // ============================================================
+
 process MANIFEST_ROW {
     tag { "${meta.uid}" }
     label 'process_low'
@@ -61,10 +63,10 @@ process MANIFEST_ROW {
 }
 
 
+// ============================================================
+//  STAGE 0 setup: WRITE_MANIFEST - run manifest - write the cohort table
+// ============================================================
 
-// ============================================================
-//  STAGE 0B: Write manifest (per-sample audit record)
-// ============================================================
 process WRITE_MANIFEST {
     label 'process_low'
 
@@ -89,8 +91,9 @@ process WRITE_MANIFEST {
 }
 
 
-
 // ============================================================
+//  SHARED: MULTIQC - MultiQC report (called by several stages)
+//
 //   Multisatge: MultiQC Aggregation
 // ============================================================
 
@@ -103,7 +106,7 @@ process MULTIQC {
     publishDir { "${params.outdir}/0x_multiqc/${params.assay == 'rna' ? 'rna_fusion' : params.analysis}" }, mode: 'copy'
 
     input:
-    tuple val(label), path(files)
+    tuple val(label), path(files, arity: '1..*')
 
     output:
     path "${label}_multiqc_report.html", emit: report
@@ -117,8 +120,11 @@ process MULTIQC {
 
 
 // ============================================================
+//  SHARED: CRAM_CONVERT - BAM to CRAM archive (markdup, bqsr and RNA mapping)
+//
 //  Multisatge CRAM CORVERT: CRAM CONVERSION
 // ============================================================
+
 process CRAM_CONVERT {
     tag { "${label}" }
 
@@ -127,7 +133,7 @@ process CRAM_CONVERT {
     // -- 0x cram save ----------------------------------------
     publishDir { "${params.outdir}/0x_crams/${label}" }, mode: 'copy', pattern: '*.cram*'
 
-    
+
     input:
     val(label)
     tuple val(meta), path(bam), path(bai)
@@ -149,14 +155,13 @@ process CRAM_CONVERT {
 
 
 // ============================================================
-//  STAGE 1A ALIGN DNA: TRIM + ALIGN + FIXMATE  (streaming single pass)
-
-//  Architecture: fastp - bwa-mem2 - samtools fixmate
+//  STAGE 1 mapping: PREPROCESS_AND_ALIGN_DNA - fastp trimming, bwa-mem2 alignment, fixmate (dedup_mode markdup)
+//
+//  Architecture: fastp -> bwa-mem2 -> samtools fixmate
 //
 //  OPTIMIZATION: Thread budget explicitly partitioned so total
 //  threads never exceeds task.cpus (prevents LSF over-subscription).
 //  fastp(2) + fixmate(2) + bwa(remainder) = task.cpus exactly.
-
 // ============================================================
 
 process PREPROCESS_AND_ALIGN_DNA {
@@ -212,7 +217,7 @@ process PREPROCESS_AND_ALIGN_DNA {
 
 
 // ============================================================
-//  STAGE 1B ALIGN UMI: EXTRACT UMI + ALIGN  (dedup_mode = umi_*)
+//  STAGE 1 mapping: ALIGN_DNA_UMI - UMI extraction (fgbio) and bwa-mem2 alignment (dedup_mode umi_*)
 //
 //  fgbio FastqToBam reads the 3M2S+T structure on BOTH mates:
 //    3M = 3 bp molecular barcode  - RX tag
@@ -239,9 +244,14 @@ process ALIGN_DNA_UMI {
     tuple val(meta), path("${meta.uid}.umi.mapped.bam"), emit: chunk_bams
 
     script:
-    def fastq_heap   = 8  
-    def zipper_heap  = 4  
-    
+    // Heaps and sort buffer scale with the task's memory (capped at the tuned values) so a
+    // smaller allocation does not over-commit: FastqToBam runs alone; ZipperBams, bwa-mem2
+    // (index-bound) and the 2-thread sort run together.
+    def mem_gb       = task.memory ? task.memory.toGiga() : 48
+    def fastq_heap   = Math.max(2, Math.min(8, (mem_gb * 0.5) as int))
+    def zipper_heap  = Math.max(1, Math.min(4, (mem_gb * 0.08) as int))
+    def sort_mem_mb  = Math.max(256, Math.min(4096, (mem_gb * 1024 * 0.1 / 2) as int))
+
     // Dynamically calculate threads to avoid over-subscribing the cluster node
     def bwa_threads  = Math.max((task.cpus - 4).toInteger(), 4)
 
@@ -255,7 +265,7 @@ process ALIGN_DNA_UMI {
     # STEP 1: Generate the unmapped BAM containing UMI structural molecular tags
     fgbio --tmp-dir "\${tmp_dir}" -Xmx${fastq_heap}g FastqToBam \\
         --input ${reads[0]} ${reads[1]} \\
-        --read-structures ${params.umi_read_structure ?: '3M2S+T'} ${params.umi_read_structure_r2 ?: (params.umi_read_structure ?: '3M2S+T')} \\
+        --read-structures ${params.umi_read_structure} ${params.umi_read_structure_r2 ?: params.umi_read_structure} \\
         --sample ${meta.sample_id} \\
         --library ${meta.batch} \\
         --read-group-id ${meta.uid} \\
@@ -269,7 +279,7 @@ process ALIGN_DNA_UMI {
     | fgbio --tmp-dir "\${tmp_dir}" --compression 0 -Xmx${zipper_heap}g ZipperBams \\
         --unmapped ./chunk_unmapped.bam \\
         --ref ${ref_fasta} \\
-    | samtools sort -@ 2 -m 4G -T "\${tmp_dir}"/sam_sort_tmp -o ${meta.uid}.umi.mapped.bam -
+    | samtools sort -@ 2 -m ${sort_mem_mb}M -T "\${tmp_dir}"/sam_sort_tmp -o ${meta.uid}.umi.mapped.bam -
 
     # Clean up intermediate unmapped data
     rm -f ./chunk_unmapped.bam
@@ -279,8 +289,9 @@ process ALIGN_DNA_UMI {
 
 
 // ============================================================
-//  STAGE 2A MARKDUP: MERGE + SORT + MARK DUPLICATES
+//  STAGE 2 markdup: MERGE_AND_MARK_DUPLICATES - merge chunks, sort and mark duplicates (samtools markdup)
 // ============================================================
+
 process MERGE_AND_MARK_DUPLICATES {
     tag { "${meta.sample_id}" }
 
@@ -327,7 +338,7 @@ process MERGE_AND_MARK_DUPLICATES {
 
 
 // ============================================================
-//  STAGE 2B CONSENSUS UMI: MERGE + UMI CONSENSUS  (dedup_mode = umi_consensus)
+//  STAGE 2 markdup: MERGE_AND_CONSENSUS - merge chunks and call UMI consensus reads (dedup_mode umi_consensus)
 //
 //  fgbio single-strand consensus, the ideal FFPE path:
 //    GroupReadsByUmi (adjacency)  - families by UMI + position
@@ -360,15 +371,17 @@ process MERGE_AND_CONSENSUS {
     script:
     def bwa_threads      = Math.max(task.cpus - 2, 1)
 
-    // Initial standalone sort buffer (14 threads x 5G = 70GB footprint)
-    def phase1_sort_mem  = "5G"
-
-    // Streamed Java heaps balanced to fit inside 150GB
-    def group_heap       = 24
-    def call_heap        = 16
-    def filter_heap      = 16
-    def zipper_heap      = 8
-    def phase4_sort_mem  = "1500M" // ~21GB final coordinate sort pool
+    // Tuned for 150 GB; every buffer scales down with a smaller allocation (factor f) so
+    // the concurrent JVMs + sort never exceed task.memory.
+    def mem_gb           = task.memory ? task.memory.toGiga() : 150
+    def f                = Math.min(1.0d, mem_gb / 150.0d)
+    def ncpu             = (task.cpus ?: 1) as int
+    def phase1_sort_mem  = "${Math.max(256, Math.min(5120, (mem_gb * 1024 * 0.5 / ncpu) as int))}M"   // sort runs alone
+    def group_heap       = Math.max(2, (24 * f) as int)
+    def call_heap        = Math.max(2, (16 * f) as int)
+    def filter_heap      = Math.max(2, (16 * f) as int)
+    def zipper_heap      = Math.max(1, (8 * f) as int)
+    def phase4_sort_mem  = "${Math.max(128, Math.min(1500, (mem_gb * 1024 * 0.15 / ncpu) as int))}M"
 
     // Consensus parameters
     def min_reads    = params.consensus_min_reads ?: 1
@@ -380,14 +393,13 @@ process MERGE_AND_CONSENSUS {
     """
     set -euo pipefail
 
-    # Setup temporary directory structure based on your format
+    # task-local scratch (JVM and samtools spill files)
     tmp_dir="./mer_con_tmp"
     mkdir -p "\$tmp_dir"
-    
-    # Explicitly force the JVM runtime environment to use your workspace folder
+
     export TMPDIR="\$tmp_dir"
-    
-    # Safety trap to clear out all intermediate assets on exit
+
+    # intermediates are removed on any exit
     trap 'rm -rf "\$tmp_dir" ./sorted_template.bam ./grouped_transient.bam ./unmapped_consensus.bam' EXIT
 
     # =========================================================================
@@ -409,7 +421,7 @@ process MERGE_AND_CONSENSUS {
         --family-size-histogram ${meta.sample_id}_family_sizes.txt \\
         --output ./grouped_transient.bam
 
-    # Wipe the raw template file immediately to free up workspace disk space
+    # free disk before the next phase
     rm -f ./sorted_template.bam
 
     # =========================================================================
@@ -430,7 +442,6 @@ process MERGE_AND_CONSENSUS {
         --min-base-quality ${min_base_q} \\
         --output ./unmapped_consensus.bam
 
-    # Clear out the intermediate grouped file
     rm -f ./grouped_transient.bam
 
     # =========================================================================
@@ -450,8 +461,10 @@ process MERGE_AND_CONSENSUS {
     samtools index -@ ${task.cpus} ${meta.sample_id}_consensus.bam ${meta.sample_id}_consensus.bai
     """
 }
+
+
 // ============================================================
-//  STAGE 2C MARKDUP UMI: MERGE + UMI-AWARE MARKDUP  (dedup_mode = umi_markdup)
+//  STAGE 2 markdup: MERGE_AND_MARKDUP_UMI - merge chunks and UMI-aware duplicate marking (dedup_mode umi_markdup)
 //
 //  Lighter than consensus: uses the UMI to dedup more accurately than
 //  coordinates alone (Picard MarkDuplicates BARCODE_TAG=RX), but does
@@ -482,12 +495,15 @@ process MERGE_AND_MARKDUP_UMI {
     script:
     def parallel_gc_threads = Math.max((task.cpus / 2).toInteger(), 2)
     // Reserve 15% (min 10G) as OS/JVM-overhead cushion so LSF doesn't evict.
-    def system_buffer = Math.max((task.memory.toGiga() * 0.15).toInteger(), 10)
-    def mem_gb        = (task.memory.toGiga() - system_buffer).toInteger()
+    // Non-heap reserve: 15% (at least 10 GB on large nodes, but never more than a quarter of
+    // the task, so a small allocation still leaves a positive heap).
+    def task_gb       = task.memory.toGiga()
+    def system_buffer = Math.max(task_gb * 0.15d, Math.min(10.0d, task_gb * 0.25d))
+    def mem_gb        = Math.max((task_gb - system_buffer) as int, 1)
     // def java_opts     = "-Xmx${mem_gb}g -XX:ParallelGCThreads=${parallel_gc_threads} -Dsamjdk.use_async_io_write_samtools=true -Dsamjdk.use_async_io_read_samtools=true"
     def java_opts = "-Xmx${mem_gb}g -XX:ParallelGCThreads=${parallel_gc_threads}"
     def bam_list      = chunk_bams instanceof List ? chunk_bams : [chunk_bams]
-    def input_list    = bam_list.collect { "-I $it" }.join(' ')
+    def input_list    = bam_list.collect { b -> "-I ${b}" }.join(' ')
     """
     set -euo pipefail
 
@@ -509,10 +525,10 @@ process MERGE_AND_MARKDUP_UMI {
 }
 
 
+// ============================================================
+//  STAGE 3 metrics: MOSDEPTH - coverage - mosdepth
+// ============================================================
 
-// ============================================================
-//  STAGE 3A MOSEDEPTH QC: COVERAGE QC - mosdepth
-// ============================================================
 process MOSDEPTH {
     tag { "${meta.sample_id}" }
     label 'process_qc'
@@ -532,6 +548,7 @@ process MOSDEPTH {
     tuple val(meta), path("${meta.sample_id}.regions.bed.gz"),           optional: true, emit: regions
     tuple val(meta), path("${meta.sample_id}.thresholds.bed.gz"),        optional: true, emit: thresholds
     tuple val(meta), path("${meta.sample_id}.gene_coverage.tsv"),        optional: true, emit: gene_coverage
+    tuple val(meta), path("${meta.sample_id}.quantized.bed.gz"),         emit: quantized   // depth classes (callable territory for TMB)
 
     script:
     // WES: per-target regions (--by capture BED) enable --thresholds + --quantize.
@@ -540,7 +557,7 @@ process MOSDEPTH {
     //      keeps thresholds/quantize working and gives genome coverage in windows.
     def is_wgs = (meta.assay == 'wgs')
     def by_flag = is_wgs
-        ? "--by ${params.mosdepth_wgs_window ?: 1000}"
+        ? "--by ${params.mosdepth_wgs_window ?: 500}"
         : ((meta.assay == 'wes' && interval_bed) ? "--by ${interval_bed}" : '')
     // --thresholds is a TARGET-capture metric (% of target bases >= X). Meaningful
     // for WES only. On WGS windows it measures "% of arbitrary windows crossing X",
@@ -549,65 +566,28 @@ process MOSDEPTH {
     def thresholds_flag = (!is_wgs && by_flag) ? "--thresholds 1,10,20,30,50,100" : ''
     // Per-gene coverage of reportable genes (WES + WGS): a negative result is only
     // reportable where the gene is covered. MAPQ-filtered (usable) depth.
-    def gene_mapq  = (params.coverage_report_min_mapq != null) ? params.coverage_report_min_mapq : 20
-    def gene_block = !coverage_report_bed ? '' : """
-    gene_md() {
-        mosdepth \\
-            --threads ${task.cpus} --no-per-base --mapq ${gene_mapq} \\
-            --by "\$1" --thresholds 10,20,30,50,100 \\
-            ${meta.sample_id}.genes ${bam}
-    }
-    gene_md ${coverage_report_bed}
-    if [ -z "\$(zcat ${meta.sample_id}.genes.regions.bed.gz | head -1)" ]; then
-        # no region matched the BAM: most often chr1-vs-1 naming. Retry once with toggled names.
-        echo "WARN: coverage_report_bed matched no BAM contig - retrying with toggled chr naming" >&2
-        awk -F'\\t' 'BEGIN { OFS = "\\t" } /^(#|track|browser)/ { next }
-            { c = \$1; d = (c ~ /^chr/) ? substr(c, 4) : "chr" c
-              if (d == "chrMT") d = "chrM"; else if (d == "M") d = "MT"; \$1 = d; print }' ${coverage_report_bed} > report.toggled.bed
-        gene_md report.toggled.bed
-    fi
-    if [ -z "\$(zcat ${meta.sample_id}.genes.regions.bed.gz | head -1)" ]; then
-        echo "WARN: coverage_report_bed shares no contig with the BAM - gene coverage NOT computed" >&2
-        printf '# ERROR: coverage_report_bed shares no contig with the BAM (check chr naming / build)\\n' > ${meta.sample_id}.gene_coverage.tsv
-    else
-
-    # length-weighted per-gene summary (col4 of the report BED = gene)
-    zcat ${meta.sample_id}.genes.regions.bed.gz \\
-        | awk -F'\\t' '{ L = \$3 - \$2; bp[\$4] += L; dsum[\$4] += L * \$5 }
-                   END { for (g in bp) printf "%s\\t%d\\t%.2f\\n", g, bp[g], dsum[g] / bp[g] }' \\
-        | LC_ALL=C sort -k1,1 > depth.tmp
-    zcat ${meta.sample_id}.genes.thresholds.bed.gz \\
-        | awk -F'\\t' '!/^#/ { g = \$4; for (i = 5; i <= 9; i++) t[g, i] += \$i }
-                   END { for (k in t) { split(k, a, SUBSEP); seen[a[1]] = 1 }
-                         for (g in seen) printf "%s\\t%d\\t%d\\t%d\\t%d\\t%d\\n", g, t[g,5], t[g,6], t[g,7], t[g,8], t[g,9] }' \\
-        | LC_ALL=C sort -k1,1 > thr.tmp
-    {   printf 'gene\\ttarget_bp\\tmean_depth\\tpct_10x\\tpct_20x\\tpct_30x\\tpct_50x\\tpct_100x\\n'
-        LC_ALL=C join -t \$'\\t' depth.tmp thr.tmp \\
-            | awk -F'\\t' 'BEGIN { OFS = "\\t" }
-                { L = \$2; printf "%s\\t%d\\t%s", \$1, L, \$3
-                  for (i = 4; i <= 8; i++) printf "\\t%.4f", (L > 0 ? \$i / L : 0); printf "\\n" }'
-    } > ${meta.sample_id}.gene_coverage.tsv
-    rm -f depth.tmp thr.tmp
-    fi
-    """
+    def gene_mapq = (params.coverage_report_min_mapq != null) ? params.coverage_report_min_mapq : 20
+    def gene_cmd  = !coverage_report_bed ? '' :
+        "gene_coverage.sh --sample ${meta.sample_id} --bam ${bam} --bed ${coverage_report_bed} --mapq ${gene_mapq} --threads ${task.cpus}"
     """
     set -euo pipefail
+    # --no-per-base: the per-base track (several GB for WGS) is never used; --quantize writes
+    # the merged depth classes instead
     mosdepth \\
-        --threads ${task.cpus} \\
+        --threads ${task.cpus} --no-per-base \\
         --quantize 0:1:10:20:30:50:100: \\
         ${thresholds_flag} \\
         ${by_flag} \\
         ${meta.sample_id} ${bam}
-    ${gene_block}
+    ${gene_cmd}
     """
-
 }
 
 
+// ============================================================
+//  STAGE 3 metrics: INFER_SEX - sex inference from X/autosome coverage
+// ============================================================
 
-// ============================================================
-//  STAGE 3B: INFER SEX - mosdepth
-// ============================================================
 process INFER_SEX {
     tag { meta.sample_id }
     label 'process_low'
@@ -624,52 +604,18 @@ process INFER_SEX {
     script:
     def female_min = params.sex_female_min_xratio ?: 0.80
     def male_max   = params.sex_male_max_xratio   ?: 0.65
+    def female_max_y = (params.sex_female_max_yratio != null) ? params.sex_female_max_yratio : 0.10
+    def male_min_y   = (params.sex_male_min_yratio   != null) ? params.sex_male_min_yratio   : 0.20
     """
-    set -euo pipefail
-
-    # WES (--by capture): use the *_region (on-target) rows - whole-chromosome means are
-    # dominated by off-target reads. chr prefix optional (GRCh38 chr / b37 style).
-    if grep -q '_region' ${mosdepth_summary}; then suf="_region"; else suf=""; fi
-    auto=\$(awk -v s="\$suf" '{ c = \$1; if (s != "") { if (c !~ /_region\$/) next; sub(/_region\$/, "", c) } else if (c ~ /_region\$/) next }
-                  c ~ /^(chr)?([1-9]|1[0-9]|2[0-2])\$/ { sum += \$4; n++ }
-                  END { if (n > 0) printf "%.4f", sum / n; else print "NA" }' ${mosdepth_summary})
-    xdep=\$(awk -v s="\$suf" '\$1 == ("chrX" s) || \$1 == ("X" s) { print \$4; exit }' ${mosdepth_summary})
-    xdep="\${xdep:-NA}"
-
-    ratio="NA"; inferred="UNKNOWN"
-    if [ "\$auto" != "NA" ] && [ "\$xdep" != "NA" ] && awk "BEGIN{exit !(\$auto>0)}"; then
-        ratio=\$(awk -v x="\$xdep" -v a="\$auto" 'BEGIN{printf "%.3f", x/a}')
-        inferred=\$(awk -v r="\$ratio" -v fmin="${female_min}" -v mmax="${male_max}" \
-            'BEGIN{ if(r+0>=fmin+0) print "female"; else if(r+0<=mmax+0) print "male"; else print "AMBIGUOUS" }')
-    fi
-
-    case "${meta.sex}" in
-        0) expected="female" ;;
-        1) expected="male" ;;
-        *) expected="unknown" ;;
-    esac
-
-    if [ "\$inferred" = "UNKNOWN" ] || [ "\$inferred" = "AMBIGUOUS" ] || [ "\$expected" = "unknown" ]; then
-        flag="SKIP"
-    elif [ "\$inferred" = "\$expected" ]; then
-        flag="PASS"
-    elif [ "${meta.type}" = "DT" ]; then
-        flag="REVIEW_TUMOR"    # chrX loss / loss of Y in tumours can explain it - judge on the normal
-    else
-        flag="MISMATCH"
-    fi
-
-    {   echo -e "sample_id\\t${meta.sample_id}"
-        echo -e "chrX_autosome_ratio\\t\$ratio"
-        echo -e "inferred_sex\\t\$inferred"
-        echo -e "expected_sex\\t\$expected"
-        echo -e "sex_concordance\\t\$flag"
-    } > ${meta.sample_id}_sex.tsv
+    infer_sex.sh --sample ${meta.sample_id} --summary ${mosdepth_summary} --expected "${meta.sex}" \\
+        --type ${meta.type} --female-min ${female_min} --male-max ${male_max} \\
+        --female-max-y ${female_max_y} --male-min-y ${male_min_y}
     """
 }
 
+
 // ============================================================
-//  STAGE 3C SAMTOOLS STATS QC: ALIGNMENT STATS
+//  STAGE 3 metrics: SAMTOOLS_STATS - alignment statistics - samtools stats
 //
 //  Captures: mapping rate, error rate, average read length,
 //  insert size distribution, mismatch rate.
@@ -677,6 +623,7 @@ process INFER_SEX {
 //  quality. Both are needed for a complete QC picture.
 //  MultiQC parses samtools stats natively.
 // ============================================================
+
 process SAMTOOLS_STATS {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -704,8 +651,9 @@ process SAMTOOLS_STATS {
 
 
 // ============================================================
-//  STAGE 3D METRICS QC: METRICS - CollectMultipleMetrics + CollectHsMetrics
+//  STAGE 3 metrics: METRICS - Picard CollectMultipleMetrics and CollectHsMetrics
 // ============================================================
+
 process METRICS {
     tag { "${meta.sample_id}" }
 
@@ -757,7 +705,7 @@ process METRICS {
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_metrics_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_metrics_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
 
@@ -781,8 +729,9 @@ process METRICS {
 
 
 // ============================================================
-//  STAGE 3E VERIFYBAMID2 QC: CONTAMINATION QC
+//  STAGE 3 metrics: VERIFYBAMID2 - contamination of normals - VerifyBamID2
 // ============================================================
+
 process VERIFYBAMID2 {
     tag { "${meta.sample_id}" }
 
@@ -815,13 +764,14 @@ process VERIFYBAMID2 {
 
 
 // ============================================================
-//  STAGE 3F: QC SAMPLE-SWAP DETECTION - somalier  
+//  STAGE 3 metrics: SOMALIER_EXTRACT - sample-identity sites - somalier extract
 //
 //  somalier extract fingerprints each BAM/CRAM at known sites;
 //  somalier relate then checks that tumor and normal from the same
 //  patient_id actually match (relatedness ~1) and flags swaps/mislabels.
 //  Critical for cohorts of many tumor/normal pairs.
 // ============================================================
+
 process SOMALIER_EXTRACT {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -834,6 +784,7 @@ process SOMALIER_EXTRACT {
 
     output:
     path "extracted/${meta.sample_id}.somalier", emit: counts
+    tuple val(meta), path("extracted/${meta.sample_id}.somalier"), emit: counts_meta
 
     script:
     """
@@ -848,9 +799,10 @@ process SOMALIER_EXTRACT {
     """
 }
 
+
 // ============================================================
-//  STAGE 3G: QC SAMPLE-SWAP DETECTION - somalier  
-//============================================================
+//  STAGE 3 metrics: SOMALIER_RELATE - relatedness - somalier relate
+// ============================================================
 
 process SOMALIER_RELATE {
     tag   "cohort"
@@ -878,16 +830,42 @@ process SOMALIER_RELATE {
 
 
 // ============================================================
-//  STAGE 3H : QC SAMPLE-SWAP DETECTION - somalier  
-//============================================================
-//         END { print "# flagged_pairs="flagged"\\t(threshold="min")" > "/dev/stderr" }
-//     ' ${pairs_tsv} > sample_swap_report.tsv
+//  STAGE 3 metrics: SOMALIER_ANCESTRY - genetic ancestry - somalier ancestry
+//
+//  Normals only, projected onto the 1000 Genomes somalier profiles.
+//  Needs the same somalier sites file as SOMALIER_EXTRACT.
+// ============================================================
 
-//     flagged=\$(grep -c "FLAG_LOW_RELATEDNESS" sample_swap_report.tsv || true)
-//     echo "CHECK_SAMPLE_SWAPS: \${flagged} pair(s) below relatedness ${min_rel}" >&2
-//     """
-// }
+process SOMALIER_ANCESTRY {
+    tag   "cohort"
+    label 'process_low'
 
+    // -- 03 metrics / QC (shared) --------------------------------------
+    publishDir { "${pubDir('metrics')}/somalier" }, mode: 'copy'
+
+    input:
+    path normal_counts                  // <pid>_N.somalier files
+    path labels                         // ancestry-labels-1kg.tsv
+    path ref_dir                        // 1kg-somalier/ (one .somalier per 1000 Genomes sample)
+
+    output:
+    path "somalier-ancestry.somalier-ancestry.tsv",  emit: ancestry
+    path "somalier-ancestry.somalier-ancestry.html", emit: report
+
+    script:
+    """
+    set -euo pipefail
+    somalier ancestry \\
+        --labels ${labels} \\
+        --output-prefix somalier-ancestry \\
+        ${ref_dir}/*.somalier ++ ${normal_counts}
+    """
+}
+
+
+// ============================================================
+//  STAGE 3 metrics: CHECK_SAMPLE_SWAPS - tumor-normal pairing and sample-swap verdicts
+// ============================================================
 
 process CHECK_SAMPLE_SWAPS {
     tag { "swap_check" }
@@ -909,71 +887,19 @@ process CHECK_SAMPLE_SWAPS {
     // never hom->opposite hom). Low relatedness with IBS0 fraction <= this is LOH, not a swap.
     def max_ibs0  = (params.somalier_max_ibs0_frac != null) ? params.somalier_max_ibs0_frac : 0.02
     def analysis  = params.analysis ?: 'germline'
-    // Somatic/tumor-only: each patient's samples MUST match, cross-patient must not.
-    // Germline: samples are usually 1-per-patient and relatives may legitimately
-    // exist, so we only surface UNEXPECTED identity-level matches (possible
-    // duplicates/swaps) and never flag mere low relatedness between distinct people.
-    def is_germline = (analysis == 'germline')
+    def dup_min   = (params.somalier_dup_min_relatedness != null) ? params.somalier_dup_min_relatedness : 0.80
+    // Somatic/tumor-only: a patient's samples must match, other patients must not. Germline:
+    // relatives may exist, so only identity-level matches between sample IDs are flagged.
     """
-    set -euo pipefail
-
-    hdr=\$(head -1 ${pairs_tsv} | sed 's/^#//')
-    col() { echo "\$hdr" | tr '\\t' '\\n' | grep -nx "\$1" | cut -d: -f1; }
-    ca=\$(col sample_a); cb=\$(col sample_b); cr=\$(col relatedness)
-    ci0=\$(col ibs0); cn=\$(col n)     # optional: absent -> relatedness-only rule
-    if [ -z "\$ca" ] || [ -z "\$cb" ] || [ -z "\$cr" ]; then
-        echo "ERROR: could not find sample_a/sample_b/relatedness columns in ${pairs_tsv}" >&2
-        head -1 ${pairs_tsv} >&2; exit 1
-    fi
-
-    awk -F'\\t' -v ca="\$ca" -v cb="\$cb" -v cr="\$cr" -v ci0="\${ci0:-0}" -v cn="\${cn:-0}" \\
-        -v minrel=${min_rel} -v maxunrel=${max_unrel} -v maxibs0=${max_ibs0} -v germ="${is_germline}" '
-        function patient(s,   n){ n=s; sub(/_[^_]+\$/, "", n); return n }
-        BEGIN { OFS="\\t"; print "sample_a","sample_b","relatedness","same_patient","verdict"
-                swap=0; contam=0; dup=0; review=0 }
-        NR>1 && \$ca!="" {
-            a=\$ca; b=\$cb; rel=\$cr+0
-            same=(patient(a)==patient(b)) ? "yes" : "no"
-            verdict="PASS"
-
-            if (germ=="true") {
-                # Germline: no T/N expectation. Only flag identity-level matches
-                # between what should be different samples (duplicate/swap). A
-                # relatedness ~1.0 between two distinct sample IDs is the signal;
-                # family relationships (~0.5/0.25) are expected and NOT flagged.
-                if (rel > 0.80) { verdict="FLAG_POSSIBLE_DUPLICATE"; dup++;
-                                  print a,b,\$cr,same,verdict }
-            } else {
-                # Somatic / tumor-only: same-patient pairs must be related;
-                # different-patient pairs must not be.
-                if (same=="yes" && rel < minrel) {
-                    if (ci0 > 0 && cn > 0 && \$cn + 0 > 0 && (\$ci0 / \$cn) <= maxibs0) {
-                        verdict="REVIEW_LOW_RELATEDNESS_IBS0_OK"; review++      # LOH-compatible, same person
-                    } else { verdict="FLAG_SWAP_LOW_RELATEDNESS"; swap++ }
-                }
-                if (same=="no"  && rel > maxunrel) { verdict="FLAG_UNEXPECTED_RELATEDNESS"; contam++ }
-                if (same=="yes" || verdict!="PASS") print a,b,\$cr,same,verdict
-            }
-        }
-        END {
-            if (germ=="true")
-                print "# possible_duplicates="dup"  (relatedness>0.80 between distinct sample IDs)" > "/dev/stderr"
-            else
-                print "# REVIEW_LOW_RELATEDNESS_IBS0_OK = IBS0~0: tumour LOH in one person, OR a parent-child pair (also IBS0~0) - confirm identity"
-                print "# same_patient_swaps="swap"  loh_compatible_reviews="review"  unexpected_relatedness_pairs="contam \\
-                      "  (min_rel="minrel", max_unrel="maxunrel")" > "/dev/stderr"
-        }
-    ' ${pairs_tsv} > sample_swap_report.tsv
-
-    n=\$(( \$(wc -l < sample_swap_report.tsv) - 1 ))
-    echo "CHECK_SAMPLE_SWAPS (${analysis}): \${n} flagged/relevant pair(s)" >&2
+    check_sample_swaps.sh --pairs ${pairs_tsv} --analysis ${analysis} \\
+        --min-rel ${min_rel} --max-unrel ${max_unrel} --max-ibs0 ${max_ibs0} --dup-min ${dup_min}
     """
 
 }
 
 
 // ============================================================
-//  STAGE 3I: Soft QC gate (report-only - NEVER halts)
+//  STAGE 3 metrics: QC_GATE - soft QC gate per sample (reports only, never stops a run)
 //
 //  Evaluates per-sample coverage (mosdepth) and contamination
 //  (VerifyBamID2 FREEMIX) against thresholds, emitting PASS/WARN/UNKNOWN
@@ -981,6 +907,7 @@ process CHECK_SAMPLE_SWAPS {
 //  keep/remove a flagged sample. T/N concordance is assessed separately in
 //  somalier.pairs.tsv (already produced). Shared QC (somatic + germline).
 // ============================================================
+
 process QC_GATE {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -991,7 +918,8 @@ process QC_GATE {
     input:
     tuple val(meta), path(mosdepth_summary), path(selfsm),
           path(hs_metrics, stageAs: 'hs_metrics.txt'),
-          path(samtools_stats, stageAs: 'samtools.stats')
+          path(samtools_stats, stageAs: 'samtools.stats'),
+          path(global_dist,    stageAs: 'global.dist.txt')       // mosdepth global.dist (WGS breadth)
 
     output:
     tuple val(meta), path("${meta.sample_id}_qc_gate.tsv"), emit: report
@@ -1006,67 +934,32 @@ process QC_GATE {
                                                              : (params.qc_min_mean_coverage ?: 100))
     def max_contam    = params.qc_max_contamination   ?: 0.03
     def min_breadth   = params.qc_min_pct_target_30x  ?: 0.90
+    def min_breadth20 = params.qc_min_pct_target_20x  ?: 0.90
+    // Breadth gate by role: tumours at 30x; normals / germline samples (WES floor 50x mean) at
+    // 20x, the usual germline exome breadth metric. The other breadth row is reported as INFO.
+    def gate20        = is_normal
     def min_ontarget  = params.qc_min_on_target       ?: 0.50
     def min_mapping   = params.qc_min_mapping_rate    ?: 0.95
     def max_fold80    = params.qc_max_fold80          ?: 3.0
+    // WGS breadth: share of the autosomes (chromosome length, N gaps included) at >= 30x / 20x
+    def is_wgs        = (meta.assay == 'wgs')
+    def wgs_b30       = params.qc_wgs_min_pct_genome_30x ?: 0.80
+    def wgs_b20       = params.qc_wgs_min_pct_genome_20x ?: 0.80
     """
-    set -euo pipefail
-
-    cov=\$(awk -F'\\t' '\$1=="total_region"{print \$4}' ${mosdepth_summary})
-    if [ -z "\${cov:-}" ]; then cov=\$(awk -F'\\t' '\$1=="total"{print \$4}' ${mosdepth_summary}); fi
-    cov="\${cov:-NA}"
-
-    contam="NA"
-    if [ -s "${selfsm}" ]; then
-        contam=\$(awk -F'\\t' 'NR==1{for(i=1;i<=NF;i++) if(\$i=="FREEMIX") c=i} NR==2 && c{print \$c}' ${selfsm})
-        contam="\${contam:-NA}"
-    fi
-
-    # Picard HsMetrics (WES only): breadth, on-target, fold-80 uniformity.
-    breadth="NA"; ontarget="NA"; fold80="NA"
-    if [ -s "hs_metrics.txt" ]; then
-        breadth=\$(awk -F'\\t'  '/^BAIT_SET/{for(i=1;i<=NF;i++) if(\$i=="PCT_TARGET_BASES_30X")c=i; getline; if(c)print \$c}' hs_metrics.txt)
-        ontarget=\$(awk -F'\\t' '/^BAIT_SET/{for(i=1;i<=NF;i++) if(\$i=="PCT_SELECTED_BASES")c=i; getline; if(c)print \$c}' hs_metrics.txt)
-        fold80=\$(awk -F'\\t'   '/^BAIT_SET/{for(i=1;i<=NF;i++) if(\$i=="FOLD_80_BASE_PENALTY")c=i; getline; if(c)print \$c}' hs_metrics.txt)
-        breadth="\${breadth:-NA}"; ontarget="\${ontarget:-NA}"; fold80="\${fold80:-NA}"
-    fi
-
-    # samtools stats: mapping rate = reads mapped / raw total (SN section).
-    mapping="NA"
-    if [ -s "samtools.stats" ]; then
-        mapped=\$(awk -F'\\t' '/^SN\\treads mapped:/{print \$3; exit}' samtools.stats)
-        total=\$(awk -F'\\t'  '/^SN\\traw total sequences:/{print \$3; exit}' samtools.stats)
-        if [ -n "\${mapped:-}" ] && [ -n "\${total:-}" ] && [ "\${total:-0}" != "0" ]; then
-            mapping=\$(awk -v m="\$mapped" -v t="\$total" 'BEGIN{printf "%.4f", m/t}')
-        fi
-    fi
-
-    cov_flag=\$(awk -v v="\$cov" -v t="${min_cov}" 'BEGIN{print (v=="NA")?"UNKNOWN":((v+0>=t+0)?"PASS":"WARN")}')
-    con_flag=\$(awk -v v="\$contam" -v t="${max_contam}" 'BEGIN{print (v=="NA")?"UNKNOWN":((v+0<=t+0)?"PASS":"WARN")}')
-    brd_flag=\$(awk -v v="\$breadth" -v t="${min_breadth}" 'BEGIN{print (v=="NA")?"SKIP":((v+0>=t+0)?"PASS":"WARN")}')
-    ont_flag=\$(awk -v v="\$ontarget" -v t="${min_ontarget}" 'BEGIN{print (v=="NA")?"SKIP":((v+0>=t+0)?"PASS":"WARN")}')
-    map_flag=\$(awk -v v="\$mapping" -v t="${min_mapping}" 'BEGIN{print (v=="NA")?"UNKNOWN":((v+0>=t+0)?"PASS":"WARN")}')
-    f80_flag=\$(awk -v v="\$fold80" -v t="${max_fold80}" 'BEGIN{print (v=="NA")?"SKIP":((v+0<=t+0)?"PASS":"WARN")}')
-
-    {   echo -e "sample_id\\t${meta.sample_id}"
-        echo -e "metric\\tvalue\\tthreshold\\tflag"
-        echo -e "mean_coverage\\t\$cov\\t>=${min_cov}\\t\$cov_flag"
-        echo -e "contamination_freemix\\t\$contam\\t<=${max_contam}\\t\$con_flag"
-        echo -e "pct_target_30x\\t\$breadth\\t>=${min_breadth}\\t\$brd_flag"
-        echo -e "pct_on_target\\t\$ontarget\\t>=${min_ontarget}\\t\$ont_flag"
-        echo -e "mapping_rate\\t\$mapping\\t>=${min_mapping}\\t\$map_flag"
-        echo -e "fold_80_penalty\\t\$fold80\\t<=${max_fold80}\\t\$f80_flag"
-        echo -e "note\\tT/N_concordance_assessed_in_somalier.pairs.tsv\\t-\\t-"
-    } > ${meta.sample_id}_qc_gate.tsv
-
-    exit 0
+    qc_gate.sh --sample ${meta.sample_id} --summary ${mosdepth_summary} --selfsm "${selfsm}" \\
+        --hs hs_metrics.txt --stats samtools.stats \\
+        --min-cov ${min_cov} --max-contam ${max_contam} \\
+        --min-breadth30 ${is_wgs ? wgs_b30 : min_breadth} --min-breadth20 ${is_wgs ? wgs_b20 : min_breadth20} --gate20 ${gate20} \\
+        ${is_wgs ? "--global-dist global.dist.txt" : ''} \\
+        --min-ontarget ${min_ontarget} --min-mapping ${min_mapping} --max-fold80 ${max_fold80}
     """
 }
 
 
 // ============================================================
-//  STAGE 3J QC SUMMARY: Soft QC gate (report-only - NEVER halts)
+//  STAGE 3 metrics: QC_GATE_SUMMARY - soft QC gate - cohort summary
 // ============================================================
+
 process QC_GATE_SUMMARY {
     label 'process_low'
 
@@ -1081,45 +974,23 @@ process QC_GATE_SUMMARY {
 
     script:
     """
-    set -euo pipefail
-
-    metrics="mean_coverage contamination_freemix pct_target_30x pct_on_target mapping_rate fold_80_penalty"
-
-    { printf "SAMPLE"; for m in \$metrics; do printf "\\t%s" "\$m"; done; printf "\\tOVERALL\\n"; } > cohort_qc_summary.tsv
-
-    for f in ${gate_tsvs}; do
-        [ -s "\$f" ] || continue
-        sid=\$(awk -F'\\t' '\$1=="sample_id"{print \$2; exit}' "\$f")
-        overall="PASS"
-        line="\$sid"
-        for m in \$metrics; do
-            val=\$(awk -F'\\t' -v M="\$m" '\$1==M{print \$2; exit}' "\$f")
-            flag=\$(awk -F'\\t' -v M="\$m" '\$1==M{print \$4; exit}' "\$f")
-            val="\${val:-NA}"; flag="\${flag:-NA}"
-            line="\$line\t\$val"
-            if [ "\$flag" = "WARN" ]; then overall="WARN"; fi
-        done
-        printf "%b\\t%s\\n" "\$line" "\$overall" >> cohort_qc_summary.tsv
-    done
-
-    head -1 cohort_qc_summary.tsv > .hdr
-    tail -n +2 cohort_qc_summary.tsv | sort -t\$'\\t' -k1,1 > .body
-    cat .hdr .body > cohort_qc_summary.tsv
-    rm -f .hdr .body
+    qc_gate_summary.sh ${gate_tsvs}
     """
 }
 
+
 // ============================================================
-//  STAGE 4A: BQSR - BaseRecalibrator
+//  STAGE 4 bqsr: BASE_RECALIBRATOR - BaseRecalibrator (per shard on WGS)
 // ============================================================
+
 process BASE_RECALIBRATOR {
-    tag { "${meta.sample_id}" }
+    tag { "${meta.sample_id}:${interval_name}" }
     label 'process_medium'
 
     maxRetries    2
 
     input:
-    tuple val(meta), path(bam), path(bai)
+    tuple val(meta), path(bam), path(bai), val(interval_name), path(interval_file)
     path  ref_fasta
     path  ref_fai
     path  ref_dict
@@ -1132,16 +1003,18 @@ process BASE_RECALIBRATOR {
     path  interval_bed
 
     output:
-    tuple val(meta), path("${meta.sample_id}_recal.table"), emit: recal_table
+    tuple val(meta), path("${meta.sample_id}.${interval_name}.recal.table"), emit: recal_table
 
     script:
-    def interval_flag = (meta.assay == 'wes' && interval_bed) ? "-L ${interval_bed}" : ''
+    // WGS: the scatter shard; WES: the capture BED (single 'all' shard).
+    def interval_flag = interval_file ? "-L ${interval_file}"
+                      : ((meta.assay == 'wes' && interval_bed) ? "-L ${interval_bed}" : '')
     def java_opts = gatkJavaOpts(task)
 
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_bqsr_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_${interval_name}_bqsr_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
 
@@ -1152,19 +1025,49 @@ process BASE_RECALIBRATOR {
         --known-sites ${known_indels} \\
         ${interval_flag} \\
         --tmp-dir "\$tmp_dir" \\
-        -O ${meta.sample_id}_recal.table
+        -O ${meta.sample_id}.${interval_name}.recal.table
     """
 }
 
 
 // ============================================================
-//  STAGE 4B: BQSR - ApplyBQSR
+//  STAGE 4 bqsr: GATHER_BQSR_REPORTS - GatherBQSRReports - one table per sample
 // ============================================================
+
+process GATHER_BQSR_REPORTS {
+    tag { "${meta.sample_id}" }
+    label 'process_low'
+
+    input:
+    tuple val(meta), path(tables)
+
+    output:
+    tuple val(meta), path("${meta.sample_id}_recal.table"), emit: recal_table
+
+    script:
+    def java_opts = gatkJavaOpts(task)
+    def inputs    = (tables instanceof List ? tables : [tables]).collect { t -> "-I ${t}" }.join(' ')
+    """
+    set -euo pipefail
+    gatk --java-options "${java_opts}" GatherBQSRReports ${inputs} -O ${meta.sample_id}_recal.table
+    """
+}
+
+
+// ============================================================
+//  STAGE 4 bqsr: APPLY_BQSR - ApplyBQSR
+// ============================================================
+
 process APPLY_BQSR {
     tag { "${meta.sample_id}" }
     label 'process_medium'
 
     maxRetries    2
+
+    // Whole-BAM pass (per-shard ApplyBQSR would duplicate reads spanning shard
+    // boundaries). Single-threaded; WGS needs far more wall time than WES. WGS is not
+    // scaled by attempt: a retry must still fit the medium queue's 24 h limit.
+    time { meta.assay == 'wgs' ? 20.h : 4.h * task.attempt }
 
     // -- 04 bqsr (shared) ----------------------------------------------
     publishDir { "${pubDir('bqsr')}/bqsr_bams" }, mode: 'copy'
@@ -1188,13 +1091,14 @@ process APPLY_BQSR {
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_applybqsr_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_applybqsr_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
 
     gatk --java-options "${java_opts}" ApplyBQSR \\
         -R ${ref_fasta} -I ${bam} \\
         --bqsr-recal-file ${recal_table} \\
+        --static-quantized-quals 10 --static-quantized-quals 20 --static-quantized-quals 30 \\
         --create-output-bam-index true \\
         --tmp-dir "\$tmp_dir" \\
         -O ${meta.sample_id}_bqsr.bam
@@ -1202,43 +1106,14 @@ process APPLY_BQSR {
 }
 
 
-
-
-// // ============================================================
-// //  STAGE 5D: SOMATIC ENSEMBLE - Mutect2 + Strelka2
-// //  (bcftools norm fix applied - see CHANGELOG v5.1)
-// // ============================================================
-
-
-
 // ============================================================
-//  STAGE 6A-LOH: FACETS - allele-specific CN + LOH + purity/ploidy
-//  (Phase 4, tumor-normal)
-//
-//  FACETS infers allele-specific copy number from the B-allele
-//  frequencies at heterozygous germline SNPs, comparing tumor vs
-//  matched normal. This is what CNVkit cannot give you:
-//    - LOH (copy-neutral and copy-loss)
-//    - allele-specific (major/minor) copy number per segment
-//    - tumor purity + ploidy
-//  Matches the FACETS/Sequenza approach used by BostonGene.
-//
-//  Two steps in one process:
-//    1. snp-pileup  - pile up reads at polymorphic SNP sites (dbSNP)
-//    2. FACETS R    - two-pass (purity run seeds high-sensitivity run)
-//
-//  facets_snps = a polymorphic-SNP VCF (use the SAME dbSNP you
-//  reconciled to d1.vd1). cval = segmentation stringency.
-// ============================================================
-
-
-// ============================================================
-//  STAGE 5L-CONTAM-1: GetPileupSummaries (tumor and normal)
+//  STAGE 5 variant_calling: GETPILEUPSUMMARIES - GetPileupSummaries (tumor and normal)
 //
 //  Pileup at common biallelic germline SNP sites (params.pileup_variants),
 //  restricted to the capture BED for WES. Feeds CalculateContamination.
 //  One process, called twice (tumor BAM, normal BAM).
 // ============================================================
+
 process GETPILEUPSUMMARIES {
     tag { "${meta.sample_id}:${label}" }
     label 'process_medium'
@@ -1266,7 +1141,7 @@ process GETPILEUPSUMMARIES {
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_${label}_pile_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_${label}_pile_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
 
@@ -1281,11 +1156,12 @@ process GETPILEUPSUMMARIES {
 
 
 // ============================================================
-//  STAGE 5M-CONTAM-2: CalculateContamination (tumor vs matched normal)
+//  STAGE 5 variant_calling: CALCULATE_CONTAMINATION - CalculateContamination (tumor vs matched normal)
 //
 //  Produces the contamination table + tumor segmentation consumed by
 //  FilterMutectCalls. Matched-normal pileup sharpens the estimate.
 // ============================================================
+
 process CALCULATE_CONTAMINATION {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -1318,14 +1194,16 @@ process CALCULATE_CONTAMINATION {
 
 // Use this later for compliant with tumor only cases
 
+
 // ============================================================
-//  STAGE 5N-ORIENT: LearnReadOrientationModel (per sample)
+//  STAGE 5 variant_calling: LEARN_READ_ORIENTATION_MODEL - LearnReadOrientationModel
 //
 //  Gathers all per-interval f1r2 tarballs for a sample into one
 //  orientation-bias prior model. FFPE deamination produces strand-biased
 //  C>T/G>A calls; --orientation-bias-artifact-priors lets FilterMutectCalls
 //  flag them. This is the call-level complement to UMI consensus.
 // ============================================================
+
 process LEARN_READ_ORIENTATION_MODEL {
     tag { "${meta.sample_id}" }
     label 'process_medium'
@@ -1333,7 +1211,7 @@ process LEARN_READ_ORIENTATION_MODEL {
     maxRetries    2
 
     input:
-    tuple val(meta), path(f1r2_tarballs)
+    tuple val(meta), path(f1r2_tarballs, arity: '1..*')   // always a list (a single shard is still one -I)
 
     output:
     tuple val(meta), path("${meta.sample_id}.read-orientation-model.tar.gz"), emit: priors
@@ -1351,10 +1229,10 @@ process LEARN_READ_ORIENTATION_MODEL {
     """
 }
 
-// ============================================================
-//  STAGE 5A: Mutational signatures (COSMIC fitting)
-// ============================================================
 
+// ============================================================
+//  STAGE 5 variant_calling: MUTATIONAL_SIGNATURES - mutational signatures - COSMIC fitting
+// ============================================================
 
 process MUTATIONAL_SIGNATURES {
     tag { "${meta.sample_id}" }
@@ -1371,54 +1249,25 @@ process MUTATIONAL_SIGNATURES {
 
     script:
     def genome   = params.sig_genome_build   ?: 'GRCh38'
-    def cosmic_v = params.sig_cosmic_version  ?: 3.4
+    def cosmic_v = params.sig_cosmic_version  ?: 3.5
     // WGS must use genome-wide COSMIC signatures regardless of params.sig_exome.
     def exome    = (meta.assay == 'wgs') ? 'False'
                  : ((params.sig_exome == null ? true : params.sig_exome) ? 'True' : 'False')
     def min_snv  = params.sig_min_snv ?: 50
     """
-    set -euo pipefail
-    mkdir -p sig_input ${meta.sample_id}_signatures
-
-    # PASS-only (upstream filters run in 'tag' mode). bcftools reads .vcf and .vcf.gz.
-    bcftools view -f PASS,. "${vcf}" -O v -o sig_input/${meta.sample_id}.vcf
-
-    # Guard: COSMIC signature assignment is not statistically meaningful below a
-    # minimum SNV count. Skip cleanly (an empty/low-count VCF returns noise or errors).
-    n_snv=\$(bcftools view -H -v snps sig_input/${meta.sample_id}.vcf | wc -l)
-    echo "signatures: \$n_snv SNVs (floor ${min_snv})"
-    if [ "\$n_snv" -lt ${min_snv} ]; then
-        printf 'SKIPPED: %s SNVs (< %s) - signature fit not meaningful.\\nn_snv\\t%s\\n' \\
-            "\$n_snv" "${min_snv}" "\$n_snv" > ${meta.sample_id}_signatures/INSUFFICIENT_MUTATIONS.txt
-        exit 0
-    fi
-
-    python3 - <<'PYEOF'
-from SigProfilerAssignment import Analyzer as Analyze
-Analyze.cosmic_fit(
-    samples="sig_input",
-    output="${meta.sample_id}_signatures",
-    input_type="vcf",
-    context_type="96",
-    genome_build="${genome}",
-    cosmic_version=${cosmic_v},
-    exome=${exome},
-    make_plots=True,
-    verbose=False,
-)
-PYEOF
+    mutational_signatures.sh ${meta.sample_id} ${vcf} ${genome} ${cosmic_v} ${exome} ${min_snv}
     """
 }
 
+
 // ============================================================
-//  STAGE 5B CNV: CNVkit (tumor-normal)
+//  STAGE 5 variant_calling: CNVKIT - copy number - CNVkit
 //
 //  FIX vs v5.0: matched normal BAM now passed and used
 //  explicitly. Previously channel.value([]) was passed,
 //  causing CNVkit to fall back to PON-only mode which
 //  produces less accurate log2 ratios.
 // ============================================================
-
 
 process CNVKIT {
     tag { "${meta.sample_id}" }
@@ -1438,79 +1287,56 @@ process CNVKIT {
     output:
     tuple val(meta),
           path("${meta.sample_id}.cns"),
-          path("${meta.sample_id}.cnr"),
-          path("${meta.sample_id}-call.cns"), emit: cnv
+          path("${meta.sample_id}.cnr"), emit: cnv
 
     script:
-    def paired  = normal_bam ? 'true' : 'false'
-    def has_pon = cnvkit_pon ? 'true' : 'false'
-    def is_wgs  = (meta.assay == 'wgs') ? 'true' : 'false'
-
-    // cnvkit rejects --reference together with --targets/--fasta, so PoN presence
-    // determines the ENTIRE argument set (not two independent flags):
-    //   - PoN given      - --reference ONLY (it already encodes bins + genome)
-    //   - no PoN         - build a reference on the fly from the normal:
-    //                        --normal (if paired) + binning (WES --targets / WGS
-    //                        --method wgs [+ --access]) + --fasta
-    def batch_args
-    if (cnvkit_pon) {
-        batch_args = "--reference ${cnvkit_pon}"
-    } else {
-        def normal_arg  = normal_bam ? "--normal normal.bam " : ""
-        def binning_arg = (meta.assay == 'wgs')
-            ? ("--method wgs" + (interval_bed ? " --access ${interval_bed}" : ""))
-            : "--targets ${interval_bed}"
-        batch_args = "${normal_arg}${binning_arg} --fasta ${ref_fasta}"
-    }
-
-    // Only symlink the normal when one is present.
-    def link_normal = normal_bam
-        ? "ln -sf ${normal_bam} normal.bam && ln -sf ${normal_bai} normal.bam.bai"
-        : "true"
+    // Argument set (PoN -> --reference only; else a reference from the normal) and the
+    // tumor-only / WES-BED / WGS-PoN guards are in bin/run_cnvkit.sh.
+    def normal_args = normal_bam ? "--normal ${normal_bam} --normal-bai ${normal_bai}" : ''
+    def pon_arg     = cnvkit_pon ? "--pon ${cnvkit_pon}" : ''
+    def bed_arg     = interval_bed ? "--intervals ${interval_bed}" : ''
     """
-    set -euo pipefail
-
-    # ---- guards: fail loud rather than emit silently-wrong copy-number ----
-    if [ "${paired}" != "true" ] && [ "${has_pon}" != "true" ]; then
-        echo "ERROR: CNVkit tumor-only requires a panel-of-normals (cnvkit_pon) as --reference." >&2
-        exit 1
-    fi
-    if [ "${has_pon}" != "true" ] && [ "${is_wgs}" != "true" ] && [ ! -s "${interval_bed}" ]; then
-        echo "ERROR: assay=wes without a PoN requires a target/interval BED (--targets)." >&2
-        exit 1
-    fi
-    if [ "${is_wgs}" = "true" ] && [ "${has_pon}" = "true" ]; then
-        # An exome-style reference has 'Antitarget' bins in the gene column of its
-        # DATA rows; a WGS reference does not. Read the .cnn directly.
-        reader=cat
-        case "${cnvkit_pon}" in *.gz) reader=zcat ;; esac
-        if "\$reader" "${cnvkit_pon}" | awk 'NR>1 && \$4 ~ /[Aa]ntitarget/ {f=1; exit} END{exit !f}'; then
-            echo "ERROR: cnvkit_pon has Antitarget bins (exome-style) but assay=wgs." >&2
-            echo "       Build a WGS PoN (cnvkit.py batch --method wgs) or run reference-free." >&2
-            exit 1
-        fi
-    fi
-
-    # ---- fixed input names so output naming is independent of dedup_mode
-    #      (_markdup / _consensus / _bqsr all become tumor.bam) ----
-    ln -sf ${tumor_bam} tumor.bam
-    ln -sf ${tumor_bai} tumor.bam.bai
-    ${link_normal}
-
-    cnvkit.py batch tumor.bam \\
-        ${batch_args} \\
-        --processes ${task.cpus} \\
-        --output-dir .
-
-    # CNVkit names outputs after the input basename (tumor.*); canonicalize.
-    mv tumor.cns ${meta.sample_id}.cns
-    mv tumor.cnr ${meta.sample_id}.cnr
-    cnvkit.py call ${meta.sample_id}.cns -o ${meta.sample_id}-call.cns
+    run_cnvkit.sh --sample ${meta.sample_id} --tumor ${tumor_bam} --tumor-bai ${tumor_bai} \\
+        ${normal_args} ${pon_arg} ${bed_arg} \\
+        --assay ${meta.assay ?: 'wes'} --threads ${task.cpus} --fasta ${ref_fasta}
     """
 }
 
+
 // ============================================================
-//  STAGE 5C: MSI - MSIsensor-pro
+//  STAGE 5 variant_calling: CNVKIT_CALL - CNVkit integer copy number (purity from Sequenza when available)
+//
+//  -m clonal + --purity rescales log2 for tumour content before integer CN.
+//  Without Sequenza: CNVkit default thresholds (as before). Sex passed when known.
+//  Limitation: CNVkit centres log2 on the genome median, i.e. assumes the
+//  median is diploid; for near-triploid/tetraploid tumours Sequenza CN is primary.
+// ============================================================
+
+process CNVKIT_CALL {
+    tag { "${meta.sample_id}" }
+    label 'process_low'
+
+    publishDir { "${pubDir('variant_calling', true)}/cnv/cnvkit" }, mode: 'copy', pattern: '*-call.cns'
+
+    input:
+    tuple val(meta), path(cns), path(confints, stageAs: 'confints/*')
+
+    output:
+    tuple val(meta), path("${meta.sample_id}-call.cns"), emit: call_cns
+
+    script:
+    def sex_lab = (meta.sex?.toString() == '0') ? 'female' : (meta.sex?.toString() == '1') ? 'male' : 'unknown'
+    // [] when Sequenza did not run; a single staged file otherwise
+    def ci_list = (confints instanceof List) ? confints : [confints]
+    def ci_file = ci_list ? ci_list[0].toString() : ''
+    """
+    cnvkit_call.sh ${meta.sample_id} ${cns} ${sex_lab} ${ci_file}
+    """
+}
+
+
+// ============================================================
+//  STAGE 5 variant_calling: MSISENSOR_PRO - microsatellite instability - MSIsensor-pro
 // ============================================================
 
 process MSISENSOR_PRO {
@@ -1522,8 +1348,8 @@ process MSISENSOR_PRO {
 
     input:
     // normal_bam/bai carried IN the tuple; pass [] (empty) for tumor-only.
-    tuple val(meta), path(tumour_bam), path(tumour_bai) 
-    path(normal_bam) 
+    tuple val(meta), path(tumour_bam), path(tumour_bai)
+    path(normal_bam)
     path(normal_bai)
     path  msisensor_list   // scan list (paired) OR baseline dir (tumor-only)
     path  interval_bed     // WES: restrict evaluated sites to capture; [] or WGS = genome-wide
@@ -1533,13 +1359,15 @@ process MSISENSOR_PRO {
 
     script:
     def region_flag = (meta.assay == 'wes' && interval_bed) ? "-e ${interval_bed}" : ''
+    // per-site minimum depth: MSIsensor-pro recommends 20 for WXS, 15 for WGS
+    def min_cov     = (meta.assay == 'wgs') ? 15 : 20
     if (normal_bam) {
         // paired - msi submodule, msisensor_ref = scan list
         """
         set -euo pipefail
         msisensor-pro msi -d ${msisensor_list} \\
             -t ${tumour_bam} -n ${normal_bam} ${region_flag} \\
-            -o ${meta.sample_id}_msi -b ${task.cpus} -c 20
+            -o ${meta.sample_id}_msi -b ${task.cpus} -c ${min_cov}
         """
     } else {
         // tumor-only - pro submodule, msisensor_ref = pre-built baseline
@@ -1547,17 +1375,20 @@ process MSISENSOR_PRO {
         set -euo pipefail
         msisensor-pro pro -d ${msisensor_list} \\
             -t ${tumour_bam} ${region_flag} \\
-            -o ${meta.sample_id}_msi -b ${task.cpus} -c 20
+            -o ${meta.sample_id}_msi -b ${task.cpus} -c ${min_cov}
         """
     }
 }
 
 
 // ============================================================
+//  STAGE 5 variant_calling: MSISENSOR_GENE_MAP - unstable microsatellite sites mapped to genes
+//
 //  Gene mapping of MSIsensor-pro unstable microsatellite sites.
-//  Reads the paired-mode _somatic file; base R (runs in an R
+//  Reads the paired-mode _unstable file (_somatic in older releases); base R (runs in an R
 //  container, NOT the MSIsensor image). Keyed on Ensembl gene ID.
 // ============================================================
+
 process MSISENSOR_GENE_MAP {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -1566,7 +1397,7 @@ process MSISENSOR_GENE_MAP {
     publishDir { "${pubDir('variant_calling', true)}/msi" }, mode: 'copy'
 
     input:
-    tuple val(meta), path(somatic)     // ${sample}_msi_somatic, extracted at the call site
+    tuple val(meta), path(somatic)     // ${sample}_msi_unstable (or _somatic), extracted at the call site
     path  gene_bed                     // ensembl115_genes.bed (chr,start,end,symbol,ENSG)
 
     output:
@@ -1575,48 +1406,19 @@ process MSISENSOR_GENE_MAP {
     script:
     """
     set -euo pipefail
-    cat > msi_gene_map.R <<'RSCRIPT'
-    args <- commandArgs(trailingOnly = TRUE)
-    sites <- read.table(args[1], header=TRUE, stringsAsFactors=FALSE, check.names=FALSE)
-    req <- c("chromosome","location","repeat_times","repeat_unit_bases")
-    if (!all(req %in% colnames(sites)))
-        stop(sprintf("_somatic missing columns: %s", paste(setdiff(req, colnames(sites)), collapse=",")), call.=FALSE)
-    bed <- read.delim(args[2], sep="\\t", header=FALSE, stringsAsFactors=FALSE)
-    if (ncol(bed) < 5) stop("gene BED needs 5 columns: chr,start,end,symbol,ENSG", call.=FALSE)
-    bed <- bed[, 1:5]; colnames(bed) <- c("chr","start","end","gene","gene_id")
-    norm_chr <- function(x) { x <- sub("^chr", "", as.character(x)); x[x %in% c("M","MT")] <- "MT"; x }
-    sites\$chromosome <- norm_chr(sites\$chromosome); bed\$chr <- norm_chr(bed\$chr)
-    bed\$start      <- bed\$start + 1L
-    sites\$location <- suppressWarnings(as.integer(sites\$location))
-    have_diff <- "difference" %in% colnames(sites); have_fdr <- "FDR" %in% colnames(sites)
-    bbc <- split(seq_len(nrow(bed)), bed\$chr)
-    gsym <- character(0); gid <- character(0); si <- integer(0)
-    for (i in seq_len(nrow(sites))) {
-        idx <- bbc[[ sites\$chromosome[i] ]]; if (is.null(idx)) next
-        hit <- which(bed\$start[idx] <= sites\$location[i] & bed\$end[idx] >= sites\$location[i])
-        for (j in idx[hit]) { gsym <- c(gsym, bed\$gene[j]); gid <- c(gid, bed\$gene_id[j]); si <- c(si, i) }
-    }
-    out <- data.frame(
-        Gene_ID=gid, Hugo_Symbol=gsym, Chromosome=sites\$chromosome[si], Position=sites\$location[si],
-        Repeat_Unit=sites\$repeat_unit_bases[si], Ref_Repeat_Times=sites\$repeat_times[si],
-        Repeat_Diff = if (have_diff) sites\$difference[si] else NA,
-        FDR         = if (have_fdr)  sites\$FDR[si]        else NA,
-        Status="SOMATIC_UNSTABLE", stringsAsFactors=FALSE)
-    write.table(out, args[3], sep="\\t", quote=FALSE, row.names=FALSE)
-    cat(sprintf("Mapped %d unstable site(s) to %d gene(s)\\n", nrow(out), length(unique(gid))))
-    RSCRIPT
-    Rscript --vanilla msi_gene_map.R ${somatic} ${gene_bed} ${meta.sample_id}_msi_genes.tsv
-    rm -f msi_gene_map.R
+    Rscript --vanilla "\$(command -v msi_gene_map.R)" ${somatic} ${gene_bed} ${meta.sample_id}_msi_genes.tsv
     """
 }
 
+
 // ============================================================
-//  STAGE 5D MSI Status: MSI status classification
+//  STAGE 5 variant_calling: CLASSIFY_MSI - MSI status
 //
 //  Parses the MSIsensor-pro main output (<sample>_msi): line 2, column 3
 //  is the MSI score (% unstable sites). Applies a configurable cutoff
 //  (default 20% per MSIsensor-pro recommendation; tumor-type dependent).
 // ============================================================
+
 process CLASSIFY_MSI {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -1631,46 +1433,22 @@ process CLASSIFY_MSI {
     tuple val(meta), path("${meta.sample_id}_msi_status.txt"), emit: status
 
     script:
-    def cutoff    = params.msi_cutoff ?: 20
+    // Paired 'msi' mode = MSIsensor score (% unstable sites): >= high MSI-H, < low MSS, in
+    // between MSI-INDETERMINATE (Middha et al. 2017; Niu et al. 2014). Tumour-only 'pro'
+    // mode = msisensor-pro score, one cut-off (developers recommend >= 20%).
+    def tumor_only = (params.analysis == 'tumor_only')
+    def cut_high   = tumor_only ? params.msi_cutoff_tumor_only : params.msi_cutoff_paired_high
+    def cut_low    = tumor_only ? params.msi_cutoff_tumor_only : params.msi_cutoff_paired_low
     def min_sites = (params.msi_min_sites != null) ? params.msi_min_sites : 50
     """
-    set -euo pipefail
-
-    main="${meta.sample_id}_msi"
-    if [ ! -s "\$main" ]; then
-        echo "ERROR: MSIsensor-pro main output '\$main' not found among staged files" >&2
-        ls -l >&2
-        exit 1
-    fi
-
-    score=\$(awk 'NR==2 && \$3!=""{print \$3}' "\$main")
-    if [ -z "\${score:-}" ]; then
-        score="NA"
-        status="NA"
-    else
-        status=\$(awk -v s="\$score" -v c="${cutoff}" 'BEGIN{ if(s+0>=c+0) print "MSI-H"; else print "MSS" }')
-    fi
-
-    total=\$(awk 'NR==2{print \$1}' "\$main")
-    somatic=\$(awk 'NR==2{print \$2}' "\$main")
-    # Too few evaluable microsatellites -> the score is not interpretable.
-    if [ -n "\${total:-}" ] && [ "\$status" != "NA" ] && [ "\${total%.*}" -lt ${min_sites} ]; then
-        status="NA_LOW_SITES"
-    fi
-
-    {   echo -e "sample_id\\t${meta.sample_id}"
-        echo -e "total_sites\\t\${total:-NA}"
-        echo -e "somatic_unstable_sites\\t\${somatic:-NA}"
-        echo -e "msi_score_pct\\t\$score"
-        echo -e "msi_cutoff_pct\\t${cutoff}"
-        echo -e "msi_status\\t\$status"
-    } > ${meta.sample_id}_msi_status.txt
+    classify_msi.sh --sample ${meta.sample_id} --msi ${meta.sample_id}_msi \\
+        --high ${cut_high} --low ${cut_low} --min-sites ${min_sites}
     """
 }
 
 
 // ============================================================
-//  STAGE 6A: ANNOTATION - VEP
+//  STAGE 6 annotation: ANNOTATE_VCF - variant annotation - VEP
 // ============================================================
 
 process ANNOTATE_VCF {
@@ -1690,6 +1468,8 @@ process ANNOTATE_VCF {
     path  clinvar_tbi
     path  cosmic
     path  cosmic_tbi
+    path  gnomad_faf
+    path  gnomad_faf_tbi
 
     output:
     tuple val(meta),
@@ -1705,17 +1485,31 @@ process ANNOTATE_VCF {
     def cache_ver = params.vep_cache_version ?: 115
     def plugins_flag = vep_plugins_dir ? "--dir_plugins ${vep_plugins_dir}" : ''
     def syn_path = "${vep_cache_dir}/homo_sapiens/${cache_ver}_GRCh38/chr_synonyms.txt"
-    def clinvar_flag = clinvar ? "--custom ${clinvar},ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN" : ''
+    // ONC/ONCREVSTAT = ClinVar oncogenicity (somatic) classification; empty in releases before 2024
+    def clinvar_flag = clinvar ? "--custom ${clinvar},ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN,ONC,ONCREVSTAT" : ''
     // COSMIC is a somatic-mutation catalog - apply only in somatic contexts, not germline.
     def cosmic_flag = (cosmic && params.analysis in ['somatic', 'tumor_only'])
         ? "--custom ${cosmic},COSMIC,vcf,exact,0,GENOME_SCREEN_SAMPLE_COUNT,TIER" : ''
+    // gnomAD v4.1 grpmax filtering AF (95% CI; ClinGen-recommended for BA1/BS1): README Appendix A, step 7.6
+    def faf_flag = gnomad_faf ? "--custom ${gnomad_faf},gnomAD,vcf,exact,0,fafmax_faf95_max_joint" : ''
     """
     set -euo pipefail
     syn_flag=""
     if [ -s "${syn_path}" ]; then syn_flag="--synonyms ${syn_path}"; fi
+    # Ensembl NMD plugin (no data files): flags truncations predicted to escape NMD.
+    nmd_flag=""
+    if [ -n "${vep_plugins_dir}" ] && [ -s "${vep_plugins_dir}/NMD.pm" ]; then
+        nmd_flag="--plugin NMD"
+    else
+        echo "WARN: NMD.pm not in vep_plugins_dir; NMD escape judged from the last exon only" >&2
+    fi
+
+    # One ALT per record: per-allele consequence, ClinVar/COSMIC exact match and the
+    # classification table all need biallelic records (germline VCFs arrive unsplit).
+    bcftools norm --threads ${task.cpus} -m -any -f ${ref_fasta} -Oz -o split.vcf.gz ${vcf}
 
     vep \\
-        --input_file  ${vcf} \\
+        --input_file  split.vcf.gz \\
         --output_file ${meta.sample_id}_vep.vcf.gz \\
         --format vcf --vcf --compress_output bgzip \\
         --fork ${task.cpus} \\
@@ -1729,8 +1523,10 @@ process ANNOTATE_VCF {
         --flag_pick_allele_gene \\
         --pick_order mane_select,mane_plus_clinical,canonical,appris,tsl,biotype,ccds,rank,length \\
         ${plugins_flag} \\
+        \$nmd_flag \\
         ${clinvar_flag} \\
         ${cosmic_flag} \\
+        ${faf_flag} \\
         --stats_file  ${meta.sample_id}_vep_summary.html \\
         --buffer_size 5000 --no_escape
 
@@ -1740,7 +1536,7 @@ process ANNOTATE_VCF {
 
 
 // ============================================================
-//  STAGE 6B: Tumor Mutational Burden (TMB)
+//  STAGE 6 annotation: COMPUTE_TMB - tumor mutational burden
 //
 //  Counts PASS nonsynonymous-coding somatic variants (worst consequence
 //  per variant, via bcftools +split-vep) and divides by the non-overlapping
@@ -1748,6 +1544,7 @@ process ANNOTATE_VCF {
 //  already removed germline (the gold-standard TMB method). Cutoff default
 //  10 mut/Mb (FDA/KEYNOTE-158). Splice inclusion optional.
 // ============================================================
+
 process COMPUTE_TMB {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -1756,7 +1553,9 @@ process COMPUTE_TMB {
     publishDir { "${pubDir('annotation', true)}/tmb" }, mode: 'copy'
 
     input:
-    tuple val(meta), path(annotated_vcf), path(annotated_tbi)
+    tuple val(meta), path(annotated_vcf), path(annotated_tbi),
+          path(tumor_depth,  stageAs: 'depth_tumor/*'),     // mosdepth quantized BED of the tumour, or []
+          path(normal_depth, stageAs: 'depth_normal/*')     // ... of the matched normal, or []
     path  interval_bed
     path  coding_bed, stageAs: 'coding_bed/*'   // params.tmb_coding_bed (CDS BED) or [] -> capture-only territory
 
@@ -1764,128 +1563,26 @@ process COMPUTE_TMB {
     tuple val(meta), path("${meta.sample_id}_tmb.txt"), emit: tmb
 
     script:
+    // WGS reports NA (the interval BED is the CNVkit access BED, not a coding territory).
     def cutoff      = params.tmb_cutoff         ?: 10
     def incl_splice = params.tmb_include_splice ?: false
-    def terms = [
-        'missense_variant','stop_gained','stop_lost','start_lost',
-        'frameshift_variant','inframe_insertion','inframe_deletion',
-        'protein_altering_variant'
-    ]
-    if (incl_splice) { terms += ['splice_acceptor_variant','splice_donor_variant'] }
-    def term_re = terms.join('|')
-    // WGS: interval_bed is the CNVkit access BED, not a coding territory - a coding
-    // numerator over it is not a TMB. Emit NA (same schema) until a WGS
-    // callable-territory denominator is implemented.
-    if (meta.assay == 'wgs') {
+    def coding_arg  = coding_bed ? "--coding ${coding_bed}" : ''
+    def capture_arg = interval_bed ? "--capture ${interval_bed}" : ''    // optional for WGS
+    // callable territory: tumour depth >= filter_min_tumor_dp and normal depth >= tmb_min_normal_dp
+    def min_t_dp    = (params.filter_min_tumor_dp != null) ? params.filter_min_tumor_dp : 20
+    def min_n_dp    = (params.tmb_min_normal_dp   != null) ? params.tmb_min_normal_dp   : 10
+    def depth_args  = (tumor_depth && normal_depth)
+        ? "--tumor-depth ${tumor_depth} --normal-depth ${normal_depth} --min-tumor-depth ${min_t_dp} --min-normal-depth ${min_n_dp}" : ''
     """
-    set -euo pipefail
-    echo "COMPUTE_TMB: assay=wgs - TMB not computed (no valid WGS denominator yet)" >&2
-    {   echo -e "sample_id\\t${meta.sample_id}"
-        echo -e "nonsynonymous_coding_variants\\tNA"
-        echo -e "covered_megabases\\tNA"
-        echo -e "tmb_mut_per_mb\\tNA"
-        echo -e "tmb_cutoff\\t${cutoff}"
-        echo -e "tmb_status\\tNA"
-        echo -e "include_splice\\t${incl_splice}"
-        echo -e "territory\\tNA"
-        echo -e "consequence_source\\tNA"
-    } > ${meta.sample_id}_tmb.txt
+    compute_tmb.sh --sample ${meta.sample_id} --vcf ${annotated_vcf} --assay ${meta.assay ?: 'wes'} \\
+        ${capture_arg} ${coding_arg} ${depth_args} --cutoff ${cutoff} --include-splice ${incl_splice}
     """
-    } else {
-    """
-    set -euo pipefail
-
-    # Merge a BED (plain or .gz) into sorted, non-overlapping BED3 on stdout.
-    merge_bed() {
-        if echo "\$1" | grep -q '[.]gz\$'; then CAT=zcat; else CAT=cat; fi
-        \$CAT "\$1" | grep -v -E '^(#|track|browser)' \\
-            | awk -F'\\t' 'NF >= 3 { print \$1 "\\t" \$2 "\\t" \$3 }' \\
-            | LC_ALL=C sort -k1,1 -k2,2n \\
-            | awk -F'\\t' 'BEGIN { OFS = "\\t" }
-                { if (\$1 == c && \$2 <= e) { if (\$3 > e) e = \$3 }
-                  else { if (c != "") print c, s, e; c = \$1; s = \$2; e = \$3 } }
-                END { if (c != "") print c, s, e }'
-    }
-
-    # ---- TERRITORY (denominator AND numerator region): capture, intersected with
-    #      the coding BED when provided (sweep over +1/-1 boundary events). ----
-    # Contig naming (chr1 vs 1, chrM vs MT): bring every BED to the VCF's naming. A mismatch
-    # would otherwise give an empty territory and a silent NA.
-    bcftools view -h ${annotated_vcf} | sed -n 's/^##contig=<ID=\\([^,>]*\\).*/\\1/p' > vcf.contigs
-    harmonize() {
-        if [ ! -s vcf.contigs ]; then cat "\$1"; return; fi
-        awk -F'\\t' 'BEGIN { OFS = "\\t" } NR == FNR { ok[\$1] = 1; next }
-            { c = \$1
-              if (!(c in ok)) { d = (c ~ /^chr/) ? substr(c, 4) : "chr" c
-                                if (d == "chrMT") d = "chrM"; else if (d == "M") d = "MT"
-                                if (d in ok) c = d; else next }
-              \$1 = c; print }' vcf.contigs "\$1" | LC_ALL=C sort -k1,1 -k2,2n
-    }
-    merge_bed "${interval_bed}" > capture.raw.bed
-    harmonize capture.raw.bed > capture.merged.bed
-    if [ -n "${coding_bed}" ]; then
-        merge_bed "${coding_bed}" > coding.raw.bed
-        harmonize coding.raw.bed > coding.merged.bed
-        {   awk -F'\\t' '{ print \$1 "\\t" \$2 "\\t1\\tA"; print \$1 "\\t" \$3 "\\t-1\\tA" }' capture.merged.bed
-            awk -F'\\t' '{ print \$1 "\\t" \$2 "\\t1\\tB"; print \$1 "\\t" \$3 "\\t-1\\tB" }' coding.merged.bed
-        } | LC_ALL=C sort -k1,1 -k2,2n -k3,3n \\
-          | awk -F'\\t' 'BEGIN { OFS = "\\t" }
-              \$1 != c { c = \$1; a = 0; b = 0; open = 0 }
-              { if (\$4 == "A") a += \$3; else b += \$3
-                if (!open && a > 0 && b > 0) { st = \$2; open = 1 }
-                else if (open && !(a > 0 && b > 0)) { if (\$2 > st) print c, st, \$2; open = 0 } }' \\
-          > territory.bed
-        territory="capture_x_coding_bed"
-    else
-        cp capture.merged.bed territory.bed
-        territory="capture_bed_only(includes_non-coding_target;set_params.tmb_coding_bed)"
-    fi
-    if [ ! -s territory.bed ]; then
-        echo "ERROR: TMB territory is empty - interval_bed / tmb_coding_bed share no contig (or no overlap) with the VCF." >&2
-        echo "       VCF contigs: \$(head -3 vcf.contigs | tr '\\n' ' ')  capture: \$(cut -f1 capture.raw.bed | sort -u | head -3 | tr '\\n' ' ')" >&2
-        exit 1
-    fi
-    covered_mb=\$(awk -F'\\t' '{ t += \$3 - \$2 } END { printf "%.6f", t / 1e6 }' territory.bed)
-
-    # ---- NUMERATOR: PASS nonsynonymous variants inside the territory. One consequence
-    #      per variant: VEP PICK transcript (MANE-first pick_order) when annotated,
-    #      else worst-across-transcripts (VCFs annotated before PICK was enabled). ----
-    csq_fields=\$(bcftools +split-vep -l ${annotated_vcf} | awk '{ print \$2 }')
-    if grep -qx PICK <<< "\$csq_fields"; then
-        csq_src="VEP_PICK"
-        # PICK is per allele+gene: count each VARIANT once if any picked consequence qualifies.
-        nonsyn=\$(bcftools view -f PASS,. -T territory.bed -Ou ${annotated_vcf} \\
-            | bcftools +split-vep -d -f '%PICK\\t%CHROM\\t%POS\\t%REF\\t%ALT\\t%Consequence\\n' - \\
-            | awk -F'\\t' -v re='(${term_re})' '\$1 == "1" && \$6 ~ re { print \$2 "\\t" \$3 "\\t" \$4 "\\t" \$5 }' \\
-            | sort -u | wc -l)
-    else
-        csq_src="worst_across_transcripts"
-        nonsyn=\$(bcftools view -f PASS,. -T territory.bed -Ou ${annotated_vcf} \\
-            | bcftools +split-vep -s worst -f '%Consequence\\n' - \\
-            | grep -E -c '(${term_re})' || true)
-    fi
-
-    # ---- TMB = numerator / denominator ----
-    tmb=\$(awk -v n="\$nonsyn" -v mb="\$covered_mb" 'BEGIN{ if(mb>0) printf "%.4f", n/mb; else print "NA" }')
-    status=\$(awk -v t="\$tmb" -v c="${cutoff}" 'BEGIN{ if(t=="NA"){print "NA"} else if(t+0>=c+0){print "TMB-High"} else {print "TMB-Low"} }')
-
-    {   echo -e "sample_id\\t${meta.sample_id}"
-        echo -e "nonsynonymous_coding_variants\\t\$nonsyn"
-        echo -e "covered_megabases\\t\$covered_mb"
-        echo -e "tmb_mut_per_mb\\t\$tmb"
-        echo -e "tmb_cutoff\\t${cutoff}"
-        echo -e "tmb_status\\t\$status"
-        echo -e "include_splice\\t${incl_splice}"
-        echo -e "territory\\t\$territory"
-        echo -e "consequence_source\\t\$csq_src"
-    } > ${meta.sample_id}_tmb.txt
-    """
-    }
 }
 
 
-
 // ============================================================
+//  STAGE 7 classification: ANNOTATE_SV - SV and CNV annotation - AnnotSV
+//
 //  PHASE 1: SV/CNV ANNOTATION - AnnotSV
 //
 //  Annotates a germline SV/CNV VCF (Manta diploidSV or gCNV segments)
@@ -1899,6 +1596,7 @@ process COMPUTE_TMB {
 //  AnnotSV annotation-DB directory (params.annotsv_dir), mounted read-only.
 //  -SVinputInfo 1 preserves the original VCF INFO in the TSV.
 // ============================================================
+
 process ANNOTATE_SV {
     tag { "${meta.sample_id}:${source_tag}" }
     label 'process_medium'
@@ -1941,7 +1639,7 @@ process ANNOTATE_SV {
 
 
 // ============================================================
-//  STAGE 7: Variant pre-classification (NOT a final clinical tier)
+//  STAGE 7 classification: CLASSIFY_VARIANTS - variant pre-classification (not a clinical tier)
 //
 //  Aggregates automatable evidence - gene role/tier (COSMIC Cancer Gene
 //  Census), VEP consequence/impact, population frequency, ClinVar (if
@@ -1950,39 +1648,6 @@ process ANNOTATE_SV {
 //  AMP/ASCO/CAP tier (which requires a curated drug-variant-disease
 //  knowledge base and expert review).
 // ============================================================
-//         }
-//         {
-//             chrom=\$1; pos=\$2; ref=\$3; alt=\$4; sym=\$5; csq=\$6; impact=\$7; af=\$8; clin=\$9; cosmic_cnt=\$10
-//             in_cgc = (sym in role) ? "yes" : "no"
-//             cgc_role = (sym in role) ? role[sym] : "NA"
-//             cgc_tier = (sym in tier) ? tier[sym] : "NA"
-//             common = (af!="" && af!="." && af+0>afc+0) ? "yes" : "no"
-//             recurrent = (cosmic_cnt!="" && cosmic_cnt!="." && cosmic_cnt+0>=cosmic_min+0) ? "yes" : "no"
-//             cls="VUS"
-//             if(common=="yes"){ cls="LIKELY_BENIGN" }
-//             else if(clin ~ /[Pp]athogenic/ && in_cgc=="yes"){ cls="ONCOGENIC_STRONG" }
-//             else if(clin ~ /[Bb]enign/){ cls="LIKELY_BENIGN" }
-//             else if(in_cgc=="yes"){
-//                 if(impact=="HIGH") cls="ONCOGENIC_STRONG"
-//                 else if(impact=="MODERATE") cls="ONCOGENIC_MODERATE"
-//                 else cls="VUS"
-//             } else {
-//                 if(impact=="HIGH"||impact=="MODERATE") cls="VUS"
-//                 else cls="LIKELY_BENIGN"
-//             }
-//             if(recurrent=="yes" && in_cgc=="yes" && cls=="VUS"){ cls="ONCOGENIC_MODERATE" }
-//             print chrom,pos,ref,alt,sym,csq,impact,(af==""?".":af),(clin==""?".":clin),(cosmic_cnt==""?".":cosmic_cnt),cgc_role,cgc_tier,cls
-//         }
-//     ' variants_raw.tsv > body.tsv
-
-//     {   echo "# COMPUTATIONAL PRE-CLASSIFICATION FOR PATHOLOGIST REVIEW - NOT A FINAL AMP/ASCO/CAP CLINICAL TIER"
-//         echo "# Final tiering requires a curated knowledge base (OncoKB/CIViC) and expert review."
-//         echo -e "CHROM\\tPOS\\tREF\\tALT\\tGENE\\tCONSEQUENCE\\tIMPACT\\t${af_field}\\tClinVar\\tCOSMIC_RECURRENCE\\tCGC_ROLE\\tCGC_TIER\\tPRE_CLASSIFICATION"
-//         cat body.tsv
-//     } > ${meta.sample_id}_preclassification.tsv
-//     """
-// }
-
 
 process CLASSIFY_VARIANTS {
     tag { "${meta.sample_id}" }
@@ -1993,6 +1658,7 @@ process CLASSIFY_VARIANTS {
     input:
     tuple val(meta), path(annotated_vcf), path(annotated_tbi)
     path  cgc_tsv
+    path  af_thresholds, stageAs: 'af_thr/*'    // params.germline_af_thresholds (GENE BA1 BS1) or []
 
     output:
     tuple val(meta), path("${meta.sample_id}_preclassification.tsv"), emit: classification
@@ -2001,239 +1667,26 @@ process CLASSIFY_VARIANTS {
     def af_field          = params.classify_af_field    ?: 'MAX_AF'
     def af_cutoff         = params.classify_common_af    ?: 0.01
     def cosmic_min        = params.cosmic_recurrence_min ?: 10
+    def cosmic_strong     = params.cosmic_strong_min     ?: 50
     def clinvar_min_stars = (params.clinvar_min_stars != null) ? params.clinvar_min_stars : 1   // 0 = gating off (elvis would turn 0 into 1)
-    def cls_mode          = (params.analysis == 'germline') ? 'germline' : 'somatic'
+    // germline rules for normals (germline arm, or matched normals with germline_on_normals)
+    def cls_mode          = (params.analysis == 'germline' || meta.type == 'DN') ? 'germline' : 'somatic'
     def ba1_af            = (params.germline_ba1_af != null) ? params.germline_ba1_af : 0.05
+    def germ_low_vaf      = (params.germline_low_vaf != null) ? params.germline_low_vaf : 0.30
+    def mosaic_min_dp     = (params.germline_mosaic_min_dp != null) ? params.germline_mosaic_min_dp : 20
     """
-    set -euo pipefail
-
-    # CGC gene -> role/tier, columns located by HEADER NAME (layout differs between
-    # CGC releases; fixed indices fail silently). Missing CGC -> empty lookup.
-    if [ -n "${cgc_tsv}" ]; then
-        if echo "${cgc_tsv}" | grep -q '[.]gz\$'; then CATC=zcat; else CATC=cat; fi
-        "\$CATC" "${cgc_tsv}" | awk -F'\\t' '
-            NR==1 { for (i = 1; i <= NF; i++) { h = toupper(\$i); gsub(/[ ]+/, "_", h)
-                        if (h == "GENE_SYMBOL")    g = i
-                        if (h == "ROLE_IN_CANCER") r = i
-                        if (h == "TIER")           t = i }
-                    if (!g || !r || !t) { print "ERROR: CGC header lacks GENE_SYMBOL/ROLE_IN_CANCER/TIER" > "/dev/stderr"; bad = 1; exit 1 }
-                    next }
-            \$g != "" { print \$g "\\t" \$r "\\t" \$t }
-            END { if (bad) exit 1 }' > cgc_lookup.tsv
-    else
-        : > cgc_lookup.tsv
-    fi
-
-    fields="\$(bcftools +split-vep -l "${annotated_vcf}" 2>/dev/null | awk '{print \$2}')"
-
-    if grep -qx "COSMIC_GENOME_SCREEN_SAMPLE_COUNT" <<< "\$fields"; then
-        COSMIC_FMT='\\t%COSMIC_GENOME_SCREEN_SAMPLE_COUNT'
-    else
-        COSMIC_FMT=''
-    fi
-
-    if grep -qx "ClinVar_CLNSIG" <<< "\$fields"; then
-        CLIN_FMT='%ClinVar_CLNSIG'
-    else
-        echo "WARN: ClinVar_CLNSIG not in VCF; using VEP cache CLIN_SIG" >&2
-        CLIN_FMT='%CLIN_SIG'
-    fi
-
-    if grep -qx "ClinVar_CLNREVSTAT" <<< "\$fields"; then
-        REVSTAT_FMT='%ClinVar_CLNREVSTAT'
-    else
-        REVSTAT_FMT='.'
-    fi
-
-    # PASS-only: consensus/filter run in 'tag' mode, so failed calls are still in
-    # the VCF; they must not be pre-classified or reported.
-    # One consequence per variant: the VEP PICK transcript (MANE-first pick_order) when
-    # present, else worst-across-transcripts (VCFs annotated before PICK was enabled).
-    CSQ_FMT="%CHROM\\t%POS\\t%REF\\t%ALT\\t%SYMBOL\\t%Consequence\\t%IMPACT\\t%${af_field}\\t\${CLIN_FMT}\\t\${REVSTAT_FMT}\${COSMIC_FMT}\\n"
-    if grep -qx "PICK" <<< "\$fields"; then
-        bcftools view -f PASS,. -Ou "${annotated_vcf}" \\
-        | bcftools +split-vep -d -f "%PICK\\t\${CSQ_FMT}" - \\
-        | awk -F'\\t' '\$1 == "1"' | cut -f2- | sort -u > variants_raw.tsv
-    else
-        echo "WARN: no VEP PICK field; using worst consequence across transcripts" >&2
-        bcftools view -f PASS,. -Ou "${annotated_vcf}" \\
-        | bcftools +split-vep -s worst -d -f "\${CSQ_FMT}" - \\
-        | sort -u > variants_raw.tsv
-    fi
-
-    cat > classify.awk <<'AWK'
-BEGIN {
-    OFS = "\t"
-    while ((getline line < "cgc_lookup.tsv") > 0) {
-        split(line, a, "\t"); role[a[1]] = a[2]; tier[a[1]] = a[3]
-    }
-}
-function clinvar_class(s,   t, i, n, tok, hp, hb) {
-    if (s == "" || s == ".") return "other"
-    s = tolower(s)
-    if (s ~ /conflicting/) return "conflicting"
-    gsub(/[/,&|]+/, " ", s)
-    n = split(s, t, /[ ]+/)
-    for (i = 1; i <= n; i++) {
-        tok = t[i]
-        if (tok == "pathogenic" || tok == "likely_pathogenic") hp = 1
-        if (tok == "benign"     || tok == "likely_benign")     hb = 1
-    }
-    if (hp && !hb) return "pathogenic"
-    if (hb && !hp) return "benign"
-    if (hp && hb)  return "conflicting"
-    return "other"
-}
-function clinvar_stars(s) {
-    if (s == "" || s == ".")            return 0
-    s = tolower(s)
-    if (s ~ /no_assertion/)             return 0
-    if (s ~ /no_classification/)        return 0
-    if (s ~ /practice_guideline/)       return 4
-    if (s ~ /reviewed_by_expert_panel/) return 3
-    if (s ~ /multiple_submitters/)      return 2
-    if (s ~ /criteria_provided/)        return 1
-    return 0
-}
-{
-    chrom=\$1; pos=\$2; ref=\$3; alt=\$4; gene=\$5; csq=\$6; impact=\$7
-    af=\$8; clin=\$9; revstat=\$10; cosmic=\$11
-    in_cgc   = (gene in role)
-    cgc_role = in_cgc         ? role[gene] : "NA"
-    cgc_tier = (gene in tier) ? tier[gene] : "NA"
-    is_common    = (af     != "" && af     != "." && af+0     >  AF_CUTOFF+0)
-    is_recurrent = (cosmic != "" && cosmic != "." && cosmic+0 >= COSMIC_MIN+0)
-    high         = (impact == "HIGH")
-    moderate     = (impact == "MODERATE")
-    cv    = clinvar_class(clin)
-    stars = clinvar_stars(revstat)
-    if ((cv == "pathogenic" || cv == "benign") && stars < MIN_STARS) cv = "other"
-    lof = (csq ~ /(stop_gained|frameshift_variant|splice_acceptor_variant|splice_donor_variant|start_lost|stop_lost)/)
-    tsg = (tolower(cgc_role) ~ /tsg/)
-    onc = (tolower(cgc_role) ~ /oncogene/)
-    if (MODE == "germline") {
-        # ACMG-style vocabulary. ClinVar (star-gated) is a GERMLINE pathogenicity source.
-        if      (cv == "pathogenic")                cls = "PATHOGENIC_OR_LIKELY"
-        else if (cv == "benign")                    cls = "BENIGN_OR_LIKELY"
-        else if (af != "" && af != "." && af+0 > BA1+0) cls = "BENIGN_OR_LIKELY"          # BA1-like
-        else if (is_common)                         cls = "LIKELY_BENIGN"
-        else if (lof && in_cgc)                     cls = "LOF_CANCER_GENE_REVIEW"
-        else if (high || moderate)                  cls = "VUS"
-        else                                        cls = "LIKELY_BENIGN"
-    } else {
-        # Somatic ONCOGENICITY is gene-role aware; ClinVar (germline assertions) does not drive it.
-        #   TSG + loss-of-function         -> oncogenic (strong if COSMIC-recurrent)
-        #   oncogene + recurrent non-LoF   -> oncogenic (hotspot-like)
-        #   ClinVar P/LP (star-gated) in a TSG -> supporting (loss-of-function mechanism transfers)
-        #   truncating an oncogene alone   -> NOT oncogenic evidence (VUS_CANCER_GENE)
-        if      (cv == "benign" || is_common)       cls = "LIKELY_BENIGN"                  # population / germline leakage
-        else if (tsg && lof)                        cls = is_recurrent ? "ONCOGENIC_STRONG" : "ONCOGENIC_MODERATE"
-        else if (tsg && cv == "pathogenic")         cls = "ONCOGENIC_MODERATE"   # germline-P/LP in a TSG = loss-of-function evidence
-        else if (onc && !lof && moderate && is_recurrent) cls = "ONCOGENIC_STRONG"
-        else if (in_cgc && is_recurrent && (high || moderate)) cls = "ONCOGENIC_MODERATE"
-        else if (in_cgc && (high || moderate))      cls = "VUS_CANCER_GENE"
-        else if (high || moderate)                  cls = "VUS"
-        else                                        cls = "LIKELY_BENIGN"
-    }
-    print chrom, pos, ref, alt, gene, csq, impact, (af==""?".":af), (clin==""?".":clin), stars, (cosmic==""?".":cosmic), cgc_role, cgc_tier, cls
-}
-AWK
-
-    awk -F'\\t' -v AF_CUTOFF="${af_cutoff}" -v COSMIC_MIN="${cosmic_min}" -v MIN_STARS="${clinvar_min_stars}" \\
-        -v MODE="${cls_mode}" -v BA1="${ba1_af}" \\
-        -f classify.awk variants_raw.tsv > body.tsv
-
-    {
-        echo "# COMPUTATIONAL PRE-CLASSIFICATION FOR PATHOLOGIST REVIEW - NOT A FINAL AMP/ASCO/CAP CLINICAL TIER"
-        echo "# Final tiering requires a curated knowledge base (OncoKB/CIViC) and expert review."
-        echo "# ClinVar source: ClinVar_CLNSIG when present, else VEP cache CLIN_SIG."
-        echo "# Rules (${cls_mode}): somatic = CGC role-aware (TSG loss-of-function; recurrent oncogene change); germline = ClinVar P/LP (star-gated) + BA1 AF > ${ba1_af}."
-        printf 'CHROM\\tPOS\\tREF\\tALT\\tGENE\\tCONSEQUENCE\\tIMPACT\\t%s\\tClinVar\\tCLINVAR_STARS\\tCOSMIC_RECURRENCE\\tCGC_ROLE\\tCGC_TIER\\tPRE_CLASSIFICATION\\n' "${af_field}"
-        cat body.tsv
-    } > ${meta.sample_id}_preclassification.tsv
+    classify_variants.sh --sample ${meta.sample_id} --vcf ${annotated_vcf} --mode ${cls_mode} \\
+        ${cgc_tsv ? "--cgc ${cgc_tsv}" : ''} ${af_thresholds ? "--af-thresholds ${af_thresholds}" : ''} \\
+        --af-field ${af_field} --af-cutoff ${af_cutoff} \\
+        --cosmic-min ${cosmic_min} --cosmic-strong ${cosmic_strong} --min-stars ${clinvar_min_stars} \\
+        --ba1 ${ba1_af} --germ-low-vaf ${germ_low_vaf} --mosaic-min-dp ${mosaic_min_dp}
     """
 }
 
+
 // ============================================================
-//  STAGE 7: VCF to MAF generation 
+//  STAGE 7 classification: VCF2MAF - VCF to MAF
 // ============================================================
-// process VCF2MAF {
-//     tag { "${meta.sample_id}" }
-//     label 'process_tiny'
-
-//     // -- 07 classification (analysis-separated)----------------
-//     publishDir { "${pubDir('classification', true)}/maf" }, mode: 'copy'
-
-//     input:
-//     tuple val(meta), path(vcf), path(tbi)
-//     path  ref_fasta
-//     path  ref_fai
-
-//     output:
-//     tuple val(meta), path("${meta.sample_id}.maf"), emit: maf
-
-//    script:
-//     def tumor_id  = "${meta.sample_id}"
-//     def normal_id = "${meta.sample_id}".replaceAll(/_T$/, '_N')
-//     """
-//     set -euo pipefail
-
-//     zcat ${vcf} > input.vcf
-
-//     vcf2maf.pl \\
-//         --input-vcf      input.vcf \\
-//         --output-maf     full.maf \\
-//         --ref-fasta      ${ref_fasta} \\
-//         --tumor-id       ${tumor_id} \\
-//         --normal-id      ${normal_id} \\
-//         --vcf-tumor-id   ${tumor_id} \\
-//         --vcf-normal-id  ${normal_id} \\
-//         --ncbi-build     GRCh38 \\
-//         --inhibit-vep \\
-//         --retain-fmt     GT,AD,AF,DP
-
-//     cat > trim_maf.py <<'PYEOF'
-// import csv, sys
-// want = ["Hugo_Symbol","Gene","dbSNP_RS","NCBI_Build","Chromosome",
-//         "Start_Position","End_Position","Strand","Variant_Classification",
-//         "Variant_Type","Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2",
-//         "HGVSc","HGVSp","HGVSp_Short","Transcript_ID","Exon_Number",
-//         "t_GT","n_GT","t_depth","t_ref_count","t_alt_count",
-//         "n_depth","n_ref_count","n_alt_count","Allele","Protein_position",
-//         "Amino_acids","Codons","EXON","INTRON","Tumor_VAF","Normal_VAF",
-//         "all_effects","Feature"]
-// computed = {"Tumor_VAF", "Normal_VAF"}
-// with open("full.maf") as f:
-//     lines = f.readlines()
-// comments = [l for l in lines if l.startswith("#")]
-// data     = [l for l in lines if not l.startswith("#")]
-// reader = csv.DictReader(data, delimiter="\\t")
-// have = set(reader.fieldnames or [])
-// miss = [c for c in want if c not in computed and c not in have]
-// if miss:
-//     sys.stderr.write("WARN missing columns: " + ",".join(miss) + "\\n")
-// def vaf(a, d):
-//     try:
-//         a, d = float(a), float(d)
-//         return round(a/d, 4) if d > 0 else ""
-//     except (ValueError, TypeError):
-//         return ""
-// with open(sys.argv[1], "w", newline="") as out:
-//     for c in comments:
-//         out.write(c)
-//     w = csv.DictWriter(out, fieldnames=want, delimiter="\\t", extrasaction="ignore")
-//     w.writeheader()
-//     for row in reader:
-//         r = {c: row.get(c, "") for c in want if c not in computed}
-//         r["Tumor_VAF"]  = vaf(row.get("t_alt_count"), row.get("t_depth"))
-//         r["Normal_VAF"] = vaf(row.get("n_alt_count"), row.get("n_depth"))
-//         w.writerow(r)
-// PYEOF
-
-//     PY=\$(command -v python3 || echo /opt/conda/bin/python3)
-//     "\$PY" trim_maf.py ${meta.sample_id}.maf
-//     """
-// }
 
 process VCF2MAF {
     tag { "${meta.sample_id}" }
@@ -2251,9 +1704,9 @@ process VCF2MAF {
     tuple val(meta), path("${meta.sample_id}.maf"), emit: maf
 
    script:
-    def is_germline = (params.analysis == 'germline')
+    def is_germline = (params.analysis == 'germline' || meta.type == 'DN')
     def tumor_id  = "${meta.sample_id}"
-    def normal_id = is_germline ? "${meta.sample_id}" : "${meta.sample_id}".replaceAll(/_T$/, '_N')
+    def normal_id = is_germline ? "${meta.sample_id}" : meta.normal_id
 
     """
     set -euo pipefail
@@ -2282,72 +1735,25 @@ process VCF2MAF {
         --vcf-normal-id  ${normal_id} \\
         --ncbi-build     GRCh38 \\
         --inhibit-vep \$enst_flag \\
-        --retain-fmt     GT,AD,AF,DP
+        --retain-fmt     GT,AD,AF,DP \\
+        --retain-ann     ClinVar_CLNSIG,ClinVar_CLNREVSTAT,MAX_AF,gnomAD_fafmax_faf95_max_joint
 
-    cat > trim_maf.py <<'PYEOF'
-
-import csv, sys
-germline = ${is_germline ? 'True' : 'False'}
-if germline:
-    want = ["Hugo_Symbol","Entrez_Gene_Id","Gene","dbSNP_RS","NCBI_Build","Chromosome",
-            "Start_Position","End_Position","Strand","Variant_Classification","Variant_Type",
-            "Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2",
-            "Match_Norm_Seq_Allele1","Match_Norm_Seq_Allele2","HGVSc","HGVSp","HGVSp_Short",
-            "Transcript_ID","Exon_Number","t_GT","n_GT","n_depth","n_ref_count","n_alt_count",
-            "Allele","Protein_position","Amino_acids","Codons","EXON","INTRON","Normal_VAF",
-            "all_effects","Feature","FILTER"]
-    computed = {"Normal_VAF"}
-else:
-    want = ["Hugo_Symbol","Gene","dbSNP_RS","NCBI_Build","Chromosome",
-            "Start_Position","End_Position","Strand","Variant_Classification",
-            "Variant_Type","Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2",
-            "HGVSc","HGVSp","HGVSp_Short","Transcript_ID","Exon_Number",
-            "t_GT","n_GT","t_depth","t_ref_count","t_alt_count",
-            "n_depth","n_ref_count","n_alt_count","Allele","Protein_position",
-            "Amino_acids","Codons","EXON","INTRON","Tumor_VAF","Normal_VAF",
-            "all_effects","Feature","FILTER"]
-    computed = {"Tumor_VAF", "Normal_VAF"}
-
-with open("full.maf") as f:
-    lines = f.readlines()
-comments = [l for l in lines if l.startswith("#")]
-data     = [l for l in lines if not l.startswith("#")]
-reader = csv.DictReader(data, delimiter="\\t")
-have = set(reader.fieldnames or [])
-miss = [c for c in want if c not in computed and c not in have]
-if miss:
-    sys.stderr.write("WARN missing columns: " + ",".join(miss) + "\\n")
-def vaf(a, d):
-    try:
-        a, d = float(a), float(d)
-        return round(a/d, 4) if d > 0 else ""
-    except (ValueError, TypeError):
-        return ""
-with open(sys.argv[1], "w", newline="") as out:
-    for c in comments:
-        out.write(c)
-    w = csv.DictWriter(out, fieldnames=want, delimiter="\t", extrasaction="ignore")
-    w.writeheader()
-
-    for row in reader:
-        r = {c: row.get(c, "") for c in want if c not in computed}
-        if not germline:
-            r["Tumor_VAF"] = vaf(row.get("t_alt_count"), row.get("t_depth"))
-        r["Normal_VAF"] = vaf(row.get("n_alt_count"), row.get("n_depth"))
-        w.writerow(r)
-PYEOF
 
     PY=\$(command -v python3 || echo /opt/conda/bin/python3)
-    "\$PY" trim_maf.py ${meta.sample_id}.maf
+    "\$PY" "\$(command -v trim_maf.py)" ${meta.sample_id}.maf ${is_germline ? 'germline' : 'somatic'}
     """
 }
 
+
 // ============================================================
+//  STAGE 0 setup: PREFLIGHT_REFERENCES - reference checks before any job is submitted
+//
 //  PREFLIGHT_REFERENCES - fail fast on genome-build / contig-naming mismatches
 //  between the reference .dict and the resource VCFs / capture BED. Runs once,
 //  in parallel with mapping; 'terminate' stops the run immediately on failure
 //  instead of letting hours of alignment finish first.
 // ============================================================
+
 process PREFLIGHT_REFERENCES {
     tag 'references'
     label 'process_tiny'
@@ -2365,46 +1771,39 @@ process PREFLIGHT_REFERENCES {
 
     script:
     """
-    set -uo pipefail
-    awk -F'\\t' '\$1 == "@SQ" { n = ""; l = ""
-        for (i = 2; i <= NF; i++) { if (\$i ~ /^SN:/) n = substr(\$i, 4); if (\$i ~ /^LN:/) l = substr(\$i, 4) }
-        print n "\\t" l }' ${ref_dict} > dict.tsv
-    fail=0; : > preflight_references.txt
-    note() { echo "\$1" | tee -a preflight_references.txt >&2; }
-    # exact contig lookup in the .dict (reads the whole file: no early pipe close -> no SIGPIPE)
-    in_dict() { awk -F'\\t' -v c="\$1" '\$1 == c { f = 1 } END { exit !f }' dict.tsv; }
-    # NOTE: Nextflow runs task scripts with 'bash -e'; together with pipefail, any
-    # 'producer | head' on a large file exits 141 (SIGPIPE) - hence 'set +o pipefail' subshells.
+    preflight_references.sh ${ref_dict} vcf bed
+    """
+}
 
-    for v in vcf/*; do
-        [ -e "\$v" ] || continue
-        name=\$(basename "\$v")
-        hdr=\$(bcftools view -h "\$v" 2>/dev/null) || { note "FAIL  \$name: not readable by bcftools"; fail=1; continue; }
-        # build check: PRIMARY-chromosome lengths in the header must equal the reference .dict
-        # (alt/decoy/unplaced contigs are ignored to avoid false alarms)
-        bad=\$(printf '%s\\n' "\$hdr" | sed -n 's/^##contig=<ID=\\([^,>]*\\),length=\\([0-9]*\\).*/\\1\\t\\2/p' \\
-              | awk -F'\\t' 'NR == FNR { L[\$1] = \$2; next }
-                  \$1 ~ /^(chr)?([0-9]+|X|Y)\$/ && (\$1 in L) && L[\$1] != \$2 { printf "%s(%s vs ref %s) ", \$1, \$2, L[\$1] }' dict.tsv -)
-        first=\$(set +o pipefail; bcftools view -H "\$v" 2>/dev/null | head -1 | cut -f1)
-        if [ -n "\$bad" ]; then note "FAIL  \$name: contig lengths differ from the reference (different build?): \$bad"; fail=1
-        elif [ -n "\$first" ] && ! in_dict "\$first"; then
-            case "\$name" in
-              *clinvar*|*ClinVar*|*cosmic*|*COSMIC*) note "WARN  \$name: contig '\$first' not in reference (OK only if VEP --synonyms maps it)";;
-              *) note "FAIL  \$name: contig '\$first' not in the reference .dict (chr naming / build mismatch)"; fail=1;;
-            esac
-        else note "OK    \$name"; fi
-    done
 
-    for b in bed/*; do
-        [ -e "\$b" ] || continue
-        name=\$(basename "\$b")
-        if echo "\$name" | grep -q '[.]gz\$'; then CAT=zcat; else CAT=cat; fi
-        first=\$(set +o pipefail; \$CAT "\$b" | grep -v -E '^(#|track|browser)' | head -1 | cut -f1)
-        if [ -z "\$first" ]; then note "FAIL  \$name: empty"; fail=1
-        elif ! in_dict "\$first"; then note "FAIL  \$name: contig '\$first' not in the reference .dict"; fail=1
-        else note "OK    \$name"; fi
-    done
+// ============================================================
+//  STAGE 5 variant_calling: EVIDENCE_BAM - read slices around given regions
+//
+//  EVIDENCE_BAM: reads overlapping the evidence regions (BED) for a specific project, indexed.
+//  BAM or CRAM input (CRAM decoded with the reference).
+// ============================================================
 
-    [ "\$fail" -eq 0 ] || { echo "PREFLIGHT_REFERENCES failed - see messages above" >&2; exit 1; }
+process EVIDENCE_BAM {
+    tag { "${meta.sample_id}" }
+    label 'process_low'
+
+    publishDir { "${pubDir('variant_calling', true)}/evidence_bam" }, mode: 'copy'
+
+    input:
+    tuple val(meta), path(aln), path(idx)
+    path  regions_bed
+    path  ref_fasta
+    path  ref_fai
+
+    output:
+    tuple val(meta), path("${meta.sample_id}.evidence.bam"), path("${meta.sample_id}.evidence.bam.bai"), emit: bam
+
+    script:
+    """
+    set -euo pipefail
+
+    # -M: indexed multi-region iterator (without it samtools reads the whole BAM)
+    samtools view -@ ${task.cpus} -T ${ref_fasta} -M -L ${regions_bed} -b -o ${meta.sample_id}.evidence.bam ${aln}
+    samtools index -@ ${task.cpus} ${meta.sample_id}.evidence.bam
     """
 }

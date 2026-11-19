@@ -11,7 +11,7 @@ nextflow.enable.dsl = 2
 //  SHARED CONSTANTS  -  THE single source of truth
 //
 //  Previously stageRankMap()'s contents were declared TWICE:
-//  stageRank() in main_v3.nf AND a local STAGE_RANK map inside
+//  stageRank() in main.nf AND a local STAGE_RANK map inside
 //  DNA_WORKFLOW. Declared once here; both import it. Insert a stage in
 //  one place and validation + execution stay in lockstep.
 // ============================================================
@@ -42,29 +42,17 @@ def stageRuns(String s) {
 //  is now a one-line edit here instead of a ~20-site sweep.
 // ============================================================
 
-// Reserve 2 GB for non-heap (Java metaspace + native); floor at 4 GB.
-// Byte-identical to the old inline `Math.max(task.memory.toGiga() - 2, 4)`.
+// Reserve 2 GB for non-heap (Java metaspace + native). On small allocations (< 8 GB) keep
+// the heap at 75% of the task instead: the old 4 GB floor gave a heap as large as, or larger
+// than, a 4 GB task, which the scheduler then kills. Unchanged for tasks of 8 GB or more.
 def jvmHeapGb(task) {
-    Math.max(task.memory.toGiga() - 2, 4)
+    def gb = task.memory.toGiga()
+    Math.max((gb - 2) as int, Math.max(1, (gb * 0.75d) as int))
 }
 
 // Standard GATK java-options string (unchanged content).
 def gatkJavaOpts(task) {
     "-Xmx${jvmHeapGb(task)}g -XX:+UseParallelGC"
-}
-
-// Scratch-dir shell prelude. Emits the EXACT bash hand-written in
-// GENOTYPE_GVCFS / BASE_RECALIBRATOR / MUSE_CALL / etc.: a per-task
-// TMPDIR under node-local scratch, created and auto-cleaned on EXIT.
-// `tag` keeps each process's descriptive suffix (e.g. 'ggt', 'bqsr',
-// 'muse') so work dirs stay self-documenting and collision-free.
-// The executed command is identical to the previous inline versions
-// (bash ignores the leading indentation of the spliced lines).
-def scratchPrelude(meta, String tag) {
-    """\
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_${tag}_tmp"
-    mkdir -p "\$tmp_dir"
-    trap 'rm -rf "\$tmp_dir"' EXIT"""
 }
 
 
@@ -91,6 +79,31 @@ def stageDir(String stage) {
     "${String.format('%02d', rank)}_${stage}"
 }
 
+// Samplesheet FASTQ path: absolute paths are used as given, relative ones are
+// resolved against params.fastq_root.
+def fastqPath(String p) {
+    def s = p.trim()
+    if (s.startsWith('/'))
+        return file(s, checkIfExists: true)
+    if (!params.fastq_root)
+        error "ERROR: samplesheet FASTQ '${s}' is a relative path but params.fastq_root is not set"
+    return file("${params.fastq_root}/${s}", checkIfExists: true)
+}
+
+// Natural order for shard names ('shard_2' < 'shard_10'); plain string order
+// puts 'shard_10' first when the names are not zero-padded.
+def naturalCompare(String a, String b) {
+    def ta = a.findAll(/\d+|\D+/)
+    def tb = b.findAll(/\d+|\D+/)
+    def n  = Math.min(ta.size(), tb.size())
+    def first_diff = (0..<n).collect { i ->
+        def x = ta[i]
+        def y = tb[i]
+        (x.isNumber() && y.isNumber()) ? (x as BigInteger) <=> (y as BigInteger) : x <=> y
+    }.find { c -> c != 0 }
+    return first_diff != null ? first_diff : (ta.size() <=> tb.size())
+}
+
 // analysisAware=true segregates by params.analysis (somatic|germline|tumor_only)
 // - variant-calling and everything downstream. false = shared preprocessing/QC.
 def pubDir(String stage, boolean analysisAware = false) {
@@ -99,6 +112,18 @@ def pubDir(String stage, boolean analysisAware = false) {
     def analysis = (params.assay == 'rna') ? 'rna_fusion' : params.analysis
     analysisAware ? "${base}/${analysis}" : base
 }
+// Optional samplesheet column 'sample': distinguishes several samples of one
+// patient and type (multi-region / longitudinal tumours, repeat RNA). Absent or
+// blank -> the classic <patient>_<T|N|R> ID, so existing samplesheets are unchanged.
+// No underscore allowed: the swap check recovers patient_id by stripping the last
+// '_' token of sample_id.
+def sampleLabel(Map row) {
+    def lab = (row.containsKey('sample') && row.sample != null) ? row.sample.toString().trim() : ''
+    if (lab && !(lab ==~ /[A-Za-z0-9-]+/))
+        error "Invalid sample '${row.sample}' for patient ${row.patient_id}: use letters, digits or '-' only"
+    return lab
+}
+
 // ============================================================
 //  GENERATE_META_INFO
 //
@@ -146,14 +171,15 @@ workflow GENERATE_META_INFO {
             def suffix = (row.sample_type == 'DT')  ? 'T' :
                         (row.sample_type == 'DN')  ? 'N' :
                         (row.sample_type == 'RN')  ? 'R' : 'X'
-            def sample_id = "${row.patient_id}_${suffix}"
+            def label     = sampleLabel(row)
+            def sample_id = label ? "${row.patient_id}_${label}" : "${row.patient_id}_${suffix}"
             def uid       = "${sample_id}_L${row.lane_num}_C${row.chunk}"
 
             def pu         = "${row.flowcell}.${row.run_num}.${row.lane_num}"
             def read_group = "@RG\\tID:${uid}\\tSM:${sample_id}\\tLB:${row.batch}\\tPL:ILLUMINA\\tPU:${pu}"
 
-            def fastq_1 = file("${params.fastq_root}/${row.read1}", checkIfExists: true)
-            def fastq_2 = file("${params.fastq_root}/${row.read2}", checkIfExists: true)
+            def fastq_1 = fastqPath(row.read1)
+            def fastq_2 = fastqPath(row.read2)
 
             // sex: pipeline convention 0 = female, 1 = male (Sequenza female flag, sex checks).
             // Accepts 0/1, F/M, female/male and PLINK 2 = female; blank/NA/unknown -> 'NA'.
@@ -219,15 +245,16 @@ workflow GENERATE_RNA_META_INFO {
                       "Must be one of: ${VALID_SAMPLE_TYPES.join(', ')}"
             }
 
-            def sample_id = "${row.patient_id}_R"
+            def label     = sampleLabel(row)
+            def sample_id = label ? "${row.patient_id}_${label}" : "${row.patient_id}_R"
             def uid       = "${sample_id}_L${row.lane_num}_C${row.chunk}"
             def pu        = "${row.flowcell}.${row.run_num}.${row.lane_num}"
             def read_group = "@RG\\tID:${uid}\\tSM:${sample_id}\\tLB:${row.batch}\\tPL:ILLUMINA\\tPU:${pu}"
 
             def has_r2  = row.containsKey('read2') && row.read2?.toString()?.trim()
-            def fastq_1 = file("${params.fastq_root}/${row.read1}", checkIfExists: true)
+            def fastq_1 = fastqPath(row.read1)
             def reads   = [fastq_1]
-            if (has_r2) reads << file("${params.fastq_root}/${row.read2}", checkIfExists: true)
+            if (has_r2) reads << fastqPath(row.read2)
 
             def meta = [
                 uid         : uid,

@@ -80,7 +80,7 @@ workflow PON_WORKFLOW {
     ch_germline_resource_tbi = params.germline_resource ? toFileChannel("${params.germline_resource}.tbi") : channel.value([])
 
     // interval shards - SAME directory the somatic MUTECT2 scatter uses
-    ch_intervals = channel.fromPath("${params.scatter_intervals}/*", checkIfExists: true)
+    ch_intervals = channel.fromPath("${params.scatter_intervals}/*.{interval_list,bed}", checkIfExists: true)
         .map { f -> tuple(f.baseName, f) }
 
     // -- normals - intervals cross product (scatter) ----------------------
@@ -89,30 +89,30 @@ workflow PON_WORKFLOW {
     ch_scatter_in = ch_normals.combine(ch_intervals)
         .map { meta, bam, bai, iname, ifile -> tuple(meta, bam, bai, iname, ifile) }
 
-    // -- STAGE P1: Mutect2 tumor-only per normal per interval -------------
+    // -- PON STEP 1: Mutect2 tumor-only per normal per interval -------------
     PON_MUTECT2(ch_scatter_in, ch_ref_fasta, ch_ref_fai, ch_ref_dict)
 
-    // -- STAGE P2: gather chunks -> one VCF per normal ---------------------
+    // -- PON STEP 2: gather chunks -> one VCF per normal ---------------------
     ch_per_normal_chunks = PON_MUTECT2.out.vcf_chunk
         .map { meta, iname, vcf, tbi -> tuple(meta.sample_id, meta, vcf, tbi) }
         .groupTuple()
-        .map { sid, metas, vcfs, tbis -> tuple(metas[0], vcfs, tbis) }
+        .map { sid, metas, vcfs, tbis -> tuple(metas[0], vcfs.sort { v -> v.name }, tbis.sort { t -> t.name }) }
 
     PON_MERGE_NORMAL(ch_per_normal_chunks)
 
-    // -- STAGE P3: GenomicsDBImport (all normals, scattered by interval) --
-    ch_all_normal_vcfs = PON_MERGE_NORMAL.out.vcf.map { meta, vcf, tbi -> vcf }.collect()
-    ch_all_normal_tbis = PON_MERGE_NORMAL.out.vcf.map { meta, vcf, tbi -> tbi }.collect()
+    // -- PON STEP 3: GenomicsDBImport (all normals, scattered by interval) --
+    ch_all_normal_vcfs = PON_MERGE_NORMAL.out.vcf.map { meta, vcf, tbi -> vcf }.collect(sort: true)
+    ch_all_normal_tbis = PON_MERGE_NORMAL.out.vcf.map { meta, vcf, tbi -> tbi }.collect(sort: true)
 
     PON_GENOMICSDB_IMPORT(ch_intervals, ch_all_normal_vcfs, ch_all_normal_tbis,
                            ch_ref_fasta, ch_ref_fai, ch_ref_dict)
 
-    // -- STAGE P4: CreateSomaticPanelOfNormals per shard -------------------
+    // -- PON STEP 4: CreateSomaticPanelOfNormals per shard -------------------
     PON_CREATE_SHARD(PON_GENOMICSDB_IMPORT.out.db, ch_ref_fasta, ch_ref_fai, ch_ref_dict, ch_germline_resource, ch_germline_resource_tbi)
 
-    // -- STAGE P5: merge shard PONs -> final panel_of_normals.vcf.gz ------
-    ch_pon_vcfs = PON_CREATE_SHARD.out.vcf_chunk.map { iname, vcf, tbi -> vcf }.collect()
-    ch_pon_tbis = PON_CREATE_SHARD.out.vcf_chunk.map { iname, vcf, tbi -> tbi }.collect()
+    // -- PON STEP 5: merge shard PONs -> final panel_of_normals.vcf.gz ------
+    ch_pon_vcfs = PON_CREATE_SHARD.out.vcf_chunk.map { iname, vcf, tbi -> vcf }.collect(sort: true)
+    ch_pon_tbis = PON_CREATE_SHARD.out.vcf_chunk.map { iname, vcf, tbi -> tbi }.collect(sort: true)
 
     PON_MERGE_FINAL(ch_pon_vcfs, ch_pon_tbis, ch_ref_dict)
 }

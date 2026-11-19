@@ -6,41 +6,29 @@ nextflow.enable.dsl = 2
 include { gatkJavaOpts; pubDir } from './utils'
 
 // ============================================================
-//  components_rna.nf  -  RNA Fusion Process Definitions
+//  components_rna.nf  -  RNA fusion process definitions
 //
-//  STAGE MAP (reuses the shared --start_at/--stop_at vocabulary):
-//    mapping         - STAR_ALIGN         (one shared 2-pass STAR run)
-//    metrics         - MARKDUP_RNA (QC-only) + RNASEQ_METRICS + samtools stats
-//    variant_calling - ARRIBA + STARFUSION + FUSIONCATCHER
-//                      - FUSION_CONSENSUS - FUSIONINSPECTOR
+//  Stage map (same --start_at/--stop_at vocabulary as the DNA arm):
+//    mapping         - STAR_ALIGN, SALMON_QUANT
+//    metrics         - RNASEQ_METRICS, samtools stats
+//    variant_calling - ARRIBA, STARFUSION, FUSIONCATCHER -> FUSION_CONSENSUS
+//                      -> FILTER_FUSION_CANDIDATES -> FUSIONINSPECTOR;
+//                      RNA_IMMUNE_PREP -> TRUST4, TELESCOPE
 //    annotation      - ANNOTATE_FUSIONS
 //    classification  - CONSOLIDATE_FUSION_REPORT
 //
-//  KEY EFFICIENCY DECISION - "run STAR once":
-//    A single STAR alignment emits BOTH (a) a coordinate-sorted BAM that
-//    Arriba reads directly and (b) a STAR-Fusion-compatible Chimeric.out
-//    .junction for STAR-Fusion "kickstart" (no second STAR). FusionCatcher
-//    runs its own aligners on the raw FASTQs (independent by design - its
-//    sensitivity comes from a different alignment strategy + curated DB).
-//    This replaces the naive 3-STAR layout with 1-STAR + FusionCatcher,
-//    the single largest CPU/RAM/disk saving in the arm. A fidelity escape
-//    hatch (params.rna_shared_star=false) reverts STAR-Fusion to its own
-//    bundled STAR run.
-//
-//    IMPORTANT invariant for the shared path: the STAR index MUST be built
-//    from the SAME genome+GTF as the CTAT genome library (params.ctat_lib)
-//    and use the SAME chromosome naming, or STAR-Fusion kickstart silently
-//    yields zero fusions. See STAR_GENOME_INDEX + README.
-//
-//  DEDUP NOTE: RNA duplicate marking here is QC-ONLY. Fusion callers are
-//  fed the RAW STAR BAM / FASTQs, never the dup-marked BAM - deduplication
-//  removes true fusion-supporting reads at low input and every caller
-//  models duplicates internally.
+//  One STAR run feeds two callers: its coordinate-sorted BAM goes to Arriba and
+//  its Chimeric.out.junction to STAR-Fusion ("kickstart" mode, no second STAR
+//  run; params.rna_shared_star = false gives STAR-Fusion its own STAR run).
+//  FusionCatcher aligns the raw FASTQs itself. The STAR index must use the same
+//  genome and chromosome naming as the CTAT library; its GTF may be a newer
+//  GENCODE release, because FUSION_CONSENSUS matches callers on Ensembl gene IDs.
+//  Fusion callers read the raw STAR BAM / FASTQs; no RNA duplicate marking.
 // ============================================================
 
 
 // ============================================================
-//  STAGE 1: STAR ALIGNMENT  (one shared run - Arriba BAM + STAR-Fusion junction)
+//  STAGE 1 mapping: STAR_ALIGN - STAR alignment (Arriba BAM and STAR-Fusion junctions)
 //
 //  Multi-lane/chunk safe: STAR accepts comma-separated R1/R2 file lists, so
 //  no upstream merge step is needed (unlike the DNA markdup merge). Emits:
@@ -51,6 +39,7 @@ include { gatkJavaOpts; pubDir } from './utils'
 //  Chimeric parameters follow Arriba's published recommendations AND add
 //  `Junctions` + `--chimOutJunctionFormat 1` so the same run feeds STAR-Fusion.
 // ============================================================
+
 process STAR_ALIGN {
     tag { "${meta.sample_id}" }
     label 'process_star'
@@ -63,8 +52,7 @@ process STAR_ALIGN {
 
     input:
     tuple val(meta), path(reads1), path(reads2)
-    path  star_index
-    path  gtf
+    path  star_index        // built with the GTF (splice junctions + GeneCounts come from the index)
 
     output:
     tuple val(meta),
@@ -77,7 +65,6 @@ process STAR_ALIGN {
     tuple val(meta), path("${meta.sample_id}.ReadsPerGene.out.tab"),  emit: gene_counts
 
 
-
     script:
     // Reserve 2 threads for the concurrent samtools sort/index; STAR gets the rest.
     def star_threads = Math.max(task.cpus - 2, 4)
@@ -85,8 +72,9 @@ process STAR_ALIGN {
     def r2_list      = (reads2 && (reads2 instanceof List ? reads2.size() : 1))
                        ? (reads2 instanceof List ? reads2 : [reads2]).join(',') : ''
     def read_files   = r2_list ? "${r1_list} ${r2_list}" : "${r1_list}"
-    // Auto-handle .gz vs plain FASTQ.
-    def rf_cmd       = "--readFilesCommand zcat"
+    // gzip FASTQ -> zcat; plain FASTQ -> read directly (zcat on plain text fails).
+    def r1_first     = (reads1 instanceof List ? reads1[0] : reads1).toString()
+    def rf_cmd       = r1_first.endsWith('.gz') ? '--readFilesCommand zcat' : ''
     def twopass      = (params.star_twopass == false) ? 'None' : 'Basic'
     def rg_line      = "ID:${meta.sample_id} SM:${meta.sample_id} LB:${meta.batch} PL:ILLUMINA"
 
@@ -102,6 +90,10 @@ process STAR_ALIGN {
     def shared       = (params.rna_shared_star != false)
     def chim_seg_min = params.star_chim_segment_min ?: 10
     def chim_out     = shared ? 'WithinBAM HardClip Junctions' : 'WithinBAM HardClip'
+    // Mate-overlap merging (--peOverlapNbasesMin, Arriba's recommendation) is accepted by STAR
+    // only when chimeric output is WithinBAM alone; with Junctions also written (shared mode)
+    // STAR stops with a PARAMETERS error, so shared mode runs without it.
+    def pe_overlap   = shared ? '' : '--peOverlapNbasesMin 10'
     def chim_mm      = (!shared && (params.star_chim_multimap_nmax ?: 0) as int > 0)
                        ? "--chimMultimapNmax ${params.star_chim_multimap_nmax}" : ''
     """
@@ -119,10 +111,9 @@ process STAR_ALIGN {
         --outSAMtype BAM SortedByCoordinate \\
         --outSAMunmapped Within --outBAMcompression 6 \\
         --outSAMattrRGline ${rg_line} \\
-        --sjdbGTFfile ${gtf} \\
         --twopassMode ${twopass} \\
         --quantMode GeneCounts \\
-        --outFilterMultimapNmax 50 --peOverlapNbasesMin 10 \\
+        --outFilterMultimapNmax 50 ${pe_overlap} \\
         --alignSplicedMateMapLminOverLmate 0.5 \\
         --alignSJstitchMismatchNmax 5 -1 5 5 \\
         --chimSegmentMin ${chim_seg_min} \\
@@ -149,62 +140,64 @@ process STAR_ALIGN {
     """
 }
 
-// --outSAMtype BAM SortedByCoordinate \\
-//         --outSAMunmapped Within --outBAMcompression 6 \\
-//         --limitBAMsortRAM ${(task.memory.toBytes() * 0.75) as long} \\
-
 
 // ============================================================
-//  STAGE 3A: RNA duplicate marking  (QC-ONLY - NOT fed to fusion callers)
+//  STAGE 1 mapping: SALMON_QUANT - transcript quantification - Salmon (expression only)
+//
+//  Selective alignment to a decoy-aware GENCODE index (transcripts + full
+//  GRCh38.d1.vd1 as decoys), built once outside the pipeline with the SAME
+//  Salmon version. Reads the raw FASTQs in parallel with STAR, so the fusion
+//  path is untouched. Multi-lane/chunk safe: Salmon takes space-separated file
+//  lists per mate. Library type is inferred (-l A); lib_format_counts.json must
+//  agree across the cohort.
 // ============================================================
-process MARKDUP_RNA {
+
+process SALMON_QUANT {
     tag { "${meta.sample_id}" }
-    label 'process_markdup'
+    label 'process_medium'
 
-    maxRetries 2
+    // memory { 32.GB * task.attempt }      // decoy-aware index is ~20 GB resident
+    // time   { 4.h   * task.attempt }
 
-    // -- 03 metrics / QC ------------------------------------------------
-    publishDir { "${pubDir('metrics', true)}/rnaseq_qc" }, mode: 'copy', pattern: '*_dup_metrics.txt'
-    
+    // -- 01 mapping -----------------------------------------------------
+    publishDir { "${pubDir('mapping', true)}/salmon" }, mode: 'copy'
+
     input:
-    tuple val(meta), path(bam), path(bai)
+    tuple val(meta), path(reads1), path(reads2)
+    path  salmon_index
 
     output:
-    tuple val(meta),
-          path("${meta.sample_id}_rna_markdup.bam"),
-          path("${meta.sample_id}_rna_markdup.bam.bai"), emit: bam
-    path  "${meta.sample_id}_dup_metrics.txt",           emit: metrics
+    tuple val(meta), path("${meta.sample_id}"), emit: results
 
     script:
-    def java_opts = gatkJavaOpts(task)
+    def r1        = (reads1 instanceof List ? reads1 : [reads1]).join(' ')
+    def r2        = reads2 ? (reads2 instanceof List ? reads2 : [reads2]).join(' ') : ''
+    def read_args = r2 ? "-1 ${r1} -2 ${r2}" : "-r ${r1}"
+    def gc_flag   = r2 ? '--gcBias' : ''   // fragment GC model needs pairs
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_rna_md_tmp"
-    mkdir -p "\$tmp_dir"
-    trap 'rm -rf "\$tmp_dir"' EXIT
-
-    gatk --java-options "${java_opts}" MarkDuplicates \\
-        -I ${bam} \\
-        -O ${meta.sample_id}_rna_markdup.bam \\
-        -M ${meta.sample_id}_dup_metrics.txt \\
-        --OPTICAL_DUPLICATE_PIXEL_DISTANCE 2500 \\
-        --VALIDATION_STRINGENCY SILENT \\
-        --TMP_DIR "\$tmp_dir"
-
-    samtools index -@ ${task.cpus} ${meta.sample_id}_rna_markdup.bam
+    salmon --no-version-check quant \\
+        -i ${salmon_index} \\
+        -l A \\
+        ${read_args} \\
+        --seqBias ${gc_flag} \\
+        --softclip \\
+        -p ${task.cpus} \\
+        -o ${meta.sample_id}
     """
 }
 
 
 // ============================================================
-//  STAGE 3B: RNA-seq metrics - Picard CollectRnaSeqMetrics
+//  STAGE 3 metrics: RNASEQ_METRICS - RNA-seq metrics and strandedness
 //
 //  Captures the RNA-specific QC MultiQC understands: %coding / %UTR /
 //  %intronic / %intergenic bases, median 5'-3' bias, %rRNA. Needs a
 //  refFlat (params.refflat) and, ideally, an rRNA interval_list
 //  (params.rrna_interval_list) - the latter is optional (skipped if null).
 // ============================================================
+
 process RNASEQ_METRICS {
     tag { "${meta.sample_id}" }
     label 'process_qc'
@@ -223,7 +216,7 @@ process RNASEQ_METRICS {
     path  rrna_interval_list
 
     output:
-    tuple val(meta), path("${meta.sample_id}.rna_metrics"),      emit: metrics
+    tuple val(meta), path("${meta.sample_id}.rna_metrics"),      emit: metrics, optional: true   // needs refflat
     tuple val(meta), path("${meta.sample_id}.strandedness.txt"), emit: strandedness
 
     script:
@@ -234,55 +227,29 @@ process RNASEQ_METRICS {
     def strand_spec = strand in ['reverse','rf','fr-firststrand'] ? 'SECOND_READ_TRANSCRIPTION_STRAND'
                     : strand in ['forward','fr','fr-secondstrand'] ? 'FIRST_READ_TRANSCRIPTION_STRAND'
                     : 'NONE'
-    def infer = (strand == 'auto' && gene_counts) ? 'yes' : 'no'
-    def rrna_flag = rrna_interval_list ? "--RIBOSOMAL_INTERVALS ${rrna_interval_list}" : ''
-
+    def strand_arg = (strand == 'auto' && gene_counts) ? "auto --gene-counts ${gene_counts}" : strand_spec
+    // Paired-end: keep properly paired reads (Picard stops on interchromosomal discordant
+    // pairs). Single-end reads never carry the proper-pair flag, so they are used as is.
+    def qc_filter = meta.single_end ? '-F 0x900' : '-f 2'
+    def refflat_arg = refflat ? "--refflat ${refflat}" : ''
+    def rrna_arg    = rrna_interval_list ? "--rrna ${rrna_interval_list}" : ''
     """
-
-    set -euo pipefail
-
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_rnaseqc_tmp"
-    mkdir -p "\$tmp_dir"
-    trap 'rm -rf "\$tmp_dir"' EXIT
-
-    # Prefilter to properly-paired reads: Picard's CollectRnaSeqMetrics crashes on
-    # interchromosomal discordant pairs. QC-only copy; callers use the raw BAM.
-
-    samtools view -@ ${task.cpus} -f 2 -b ${bam} -o qc_input.bam
-    samtools index -@ ${task.cpus} qc_input.bam
-
-    # Library strandedness: inferred from STAR ReadsPerGene when rna_strandedness='auto'
-    # (>= 80% of gene-assigned reads on one strand), else the configured value.
-    strand_spec="${strand_spec}"; basis="rna_strandedness=${strand}"
-    if [ "${infer}" = "yes" ]; then
-        read -r fwd rev < <(awk -F'\\t' '!/^N_/ { f += \$3; r += \$4 } END { print f + 0, r + 0 }' ${gene_counts})
-        tot=\$((fwd + rev))
-        if   [ "\$tot" -gt 0 ] && [ \$((100 * fwd / tot)) -ge 80 ]; then strand_spec="FIRST_READ_TRANSCRIPTION_STRAND"
-        elif [ "\$tot" -gt 0 ] && [ \$((100 * rev / tot)) -ge 80 ]; then strand_spec="SECOND_READ_TRANSCRIPTION_STRAND"
-        else strand_spec="NONE"; fi
-        basis="inferred from STAR gene counts: sense=\$fwd antisense=\$rev"
-    fi
-    printf 'sample_id\\t%s\\nstrand_specificity\\t%s\\nbasis\\t%s\\n' "${meta.sample_id}" "\$strand_spec" "\$basis" > ${meta.sample_id}.strandedness.txt
-
-    gatk --java-options "${java_opts}" CollectRnaSeqMetrics \\
-        -I qc_input.bam \\
-        -O ${meta.sample_id}.rna_metrics \\
-        --REF_FLAT ${refflat} \\
-        --STRAND_SPECIFICITY \$strand_spec \\
-        ${rrna_flag} \\
-        --VALIDATION_STRINGENCY SILENT --TMP_DIR "\$tmp_dir"
+    rnaseq_metrics.sh --sample ${meta.sample_id} --bam ${bam} \\
+        --strand ${strand_arg} --basis "rna_strandedness=${strand}" \\
+        ${refflat_arg} ${rrna_arg} --qc-filter "${qc_filter}" \\
+        --threads ${task.cpus} --java-opts "${java_opts}"
     """
 }
 
 
-
 // ============================================================
-//  STAGE 5A: FUSION CALLER 1 - Arriba
+//  STAGE 5 variant_calling: ARRIBA - fusion caller - Arriba
 //
 //  Reads the shared STAR BAM directly. Arriba's own blacklist +
 //  known-fusions + protein-domains resources ship with the release and are
 //  passed as params; blacklist is effectively required for precision.
 // ============================================================
+
 process ARRIBA {
     tag { "${meta.sample_id}" }
     label 'process_arriba'
@@ -330,7 +297,7 @@ process ARRIBA {
 
 
 // ============================================================
-//  STAGE 5B: FUSION CALLER 2 - STAR-Fusion
+//  STAGE 5 variant_calling: STARFUSION - fusion caller - STAR-Fusion
 //
 //  Two modes:
 //    kickstart (default, params.rna_shared_star=true): consume the shared
@@ -339,6 +306,7 @@ process ARRIBA {
 //      fallback). Selected when a junction is not supplied (empty channel).
 //  Requires the CTAT genome library (params.ctat_lib).
 // ============================================================
+
 process STARFUSION {
     tag { "${meta.sample_id}" }
     label 'process_star'
@@ -368,7 +336,7 @@ process STARFUSION {
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_sf_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_sf_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
 
@@ -394,13 +362,14 @@ process STARFUSION {
 
 
 // ============================================================
-//  STAGE 5C: FUSION CALLER 3 - FusionCatcher  (independent; heavy, optional)
+//  STAGE 5 variant_calling: FUSIONCATCHER - fusion caller - FusionCatcher
 //
 //  Runs its own aligners on the raw FASTQs with a curated DB
 //  (params.fusioncatcher_db). Slow (hours) - gate with
 //  params.use_fusioncatcher. Its orthogonal alignment strategy is what makes
 //  the ensemble robust, so keep it on when turnaround allows.
 // ============================================================
+
 process FUSIONCATCHER {
     tag { "${meta.sample_id}" }
     label 'process_fusioncatcher'
@@ -422,6 +391,7 @@ process FUSIONCATCHER {
     script:
     def r1_files = (reads1 instanceof List ? reads1 : [reads1]).join(' ')
     def r2_files = reads2 ? (reads2 instanceof List ? reads2 : [reads2]).join(' ') : ''
+    def fq_ext   = (reads1 instanceof List ? reads1[0] : reads1).toString().endsWith('.gz') ? 'fastq.gz' : 'fastq'
 
     """
     set -euo pipefail
@@ -430,9 +400,10 @@ process FUSIONCATCHER {
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir" fc_input fc_out' EXIT
 
+    # lanes concatenated per mate; the extension follows the input (gzip or plain FASTQ)
     mkdir -p fc_input
-    cat ${r1_files} > fc_input/${meta.sample_id}_R1.fastq.gz
-    ${ reads2 ? "cat ${r2_files} > fc_input/${meta.sample_id}_R2.fastq.gz" : "" }
+    cat ${r1_files} > fc_input/${meta.sample_id}_R1.${fq_ext}
+    ${ reads2 ? "cat ${r2_files} > fc_input/${meta.sample_id}_R2.${fq_ext}" : "" }
 
     fusioncatcher.py \\
         -d ${fusioncatcher_db} \\
@@ -455,7 +426,7 @@ process FUSIONCATCHER {
 
 
 // ============================================================
-//  STAGE 5D: Multi-caller fusion consensus  (analog of ENSEMBLE_CONSENSUS)
+//  STAGE 5 variant_calling: FUSION_CONSENSUS - fusion consensus across callers
 //
 //  Normalises the three callers' heterogeneous outputs to a canonical
 //  (gene5'--gene3') key + chrom:pos breakpoints, tallies caller support, and
@@ -468,6 +439,7 @@ process FUSIONCATCHER {
 //  params.fusion_readthrough_kb) are flagged, mirroring the COSMIC-recurrence
 //  rescue logic in CLASSIFY_VARIANTS.
 // ============================================================
+
 process FUSION_CONSENSUS {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -480,255 +452,33 @@ process FUSION_CONSENSUS {
           path(arriba,        stageAs: 'arriba.tsv'),
           path(starfusion,    stageAs: 'starfusion.tsv'),
           path(fusioncatcher, stageAs: 'fusioncatcher.txt')
-    path  known_fusions_tsv
+    path  known_fusions_tsv, stageAs: 'known_ref/*'   // staged in a subfolder: no clash with the working copy's name
+    path  gtf,               stageAs: 'gene_ref/*'    // RNA arm GTF: reported gene symbols
+    path  ctat_lib,          stageAs: 'ctat_ref/*'    // CTAT library ([] when not set): its GTF names genes for FusionInspector
 
     output:
     tuple val(meta), path("${meta.sample_id}_fusion_consensus.tsv"),  emit: consensus
     tuple val(meta), path("${meta.sample_id}_fusion_candidates.txt"), emit: candidates
+    tuple val(meta), path("${meta.sample_id}_fusion_names.tsv"),      emit: names
     tuple val(meta), path("${meta.sample_id}_fusion_consensus_stats.txt"), emit: stats
 
     script:
     def min_callers  = params.fusion_min_callers      ?: 2
     def readthru_kb  = params.fusion_readthrough_kb   ?: 200
-    def known_arg    = known_fusions_tsv ? "known_fusions.tsv" : 'NONE'
+    def known_arg    = known_fusions_tsv ? "${known_fusions_tsv}" : 'NONE'
+    def ctat_gtf     = ctat_lib ? "${ctat_lib}/ref_annot.gtf" : ''
     """
-    set -euo pipefail
-    ${ known_fusions_tsv ? "cp ${known_fusions_tsv} known_fusions.tsv" : "" }
-
-    cat > fusion_consensus.py <<'PYEOF'
-#!/usr/bin/env python3
-import sys, csv, re
-
-MIN_CALLERS = int(sys.argv[1])
-READTHRU_BP = int(sys.argv[2]) * 1000
-KNOWN_PATH  = sys.argv[3]
-SAMPLE      = sys.argv[4]
-
-def norm_chrom(c):
-    if c is None: return ""
-    c = str(c).strip()
-    c = re.sub(r'^chr', '', c, flags=re.I)
-    if c in ('M', 'MT'): return 'MT'
-    return c
-
-def norm_gene(g):
-    if g is None: return ""
-    g = str(g).strip().upper()
-    # drop STAR-Fusion ENSG suffix "SYMBOL^ENSG000..." and parenthetical notes
-    g = g.split('^')[0]
-    g = re.sub(r'\\(.*?\\)', '', g)
-    return g.strip()
-
-def canon_key(g5, g3):
-    a, b = norm_gene(g5), norm_gene(g3)
-    return "--".join(sorted([a, b]))       # order-insensitive for matching
-
-def split_pair(line):
-    # Separators: TAB, '--', comma, semicolon, space. A single hyphen is a separator
-    # ONLY when the line has exactly one ('BCR-ABL1'); symbols such as NKX2-1 / HLA-A
-    # contain hyphens, so 'A--B' or TAB is required for those.
-    parts = [p for p in re.split(r'[\\t,; ]+|--', line) if p]
-    if len(parts) == 1 and parts[0].count('-') == 1:
-        parts = parts[0].split('-')
-    return parts
-
-def parse_bp(s):
-    # "chr7:55019278:+" or "7:55019278" -> (chrom, pos)
-    if not s: return ("", "")
-    parts = str(s).split(':')
-    if len(parts) >= 2:
-        return (norm_chrom(parts[0]), parts[1])
-    return ("", "")
-
-def add(store, key, g5, g3, bp5, bp3, caller, support, extra):
-    d = store.setdefault(key, {
-        "genes": (g5, g3), "bp5": bp5, "bp3": bp3,
-        "callers": set(), "support": 0, "arriba_conf": "", "type": "", "known": False
-    })
-    d["callers"].add(caller)
-    try: d["support"] += int(float(support))
-    except Exception: pass
-    # keep first non-empty breakpoints / directional gene order (prefer Arriba, then STAR-Fusion)
-    if caller == "arriba" or (not d["bp5"] and bp5):
-        d["genes"] = (g5, g3); d["bp5"] = bp5 or d["bp5"]; d["bp3"] = bp3 or d["bp3"]
-    if extra.get("arriba_conf"): d["arriba_conf"] = extra["arriba_conf"]
-    if extra.get("type"):        d["type"] = extra["type"]
-
-store = {}
-
-# ---- Arriba (tab; header starts with '#gene1') ----
-try:
-    with open("arriba.tsv") as fh:
-        rows = [l.rstrip("\\n") for l in fh if l.strip()]
-    if rows:
-        hdr = rows[0].lstrip("#").split("\\t")
-        idx = {h: i for i, h in enumerate(hdr)}
-        for line in rows[1:]:
-            if line.startswith("#"): continue
-            f = line.split("\\t")
-            def g(col, dflt=""):
-                return f[idx[col]] if col in idx and idx[col] < len(f) else dflt
-            g5, g3 = norm_gene(g("gene1")), norm_gene(g("gene2"))
-            if not g5 or not g3: continue
-            bp5 = f"{norm_chrom(parse_bp(g('breakpoint1'))[0])}:{parse_bp(g('breakpoint1'))[1]}"
-            bp3 = f"{norm_chrom(parse_bp(g('breakpoint2'))[0])}:{parse_bp(g('breakpoint2'))[1]}"
-            sup = 0
-            for c in ("split_reads1", "split_reads2", "discordant_mates"):
-                try: sup += int(g(c, "0") or 0)
-                except Exception: pass
-            add(store, canon_key(g5, g3), g5, g3, bp5, bp3, "arriba", sup,
-                {"arriba_conf": g("confidence"), "type": g("type")})
-except FileNotFoundError:
-    pass
-
-# ---- STAR-Fusion (tab; header starts with '#FusionName') ----
-try:
-    with open("starfusion.tsv") as fh:
-        rows = [l.rstrip("\\n") for l in fh if l.strip()]
-    if rows:
-        hdr = rows[0].lstrip("#").split("\\t")
-        idx = {h: i for i, h in enumerate(hdr)}
-        for line in rows[1:]:
-            if line.startswith("#"): continue
-            f = line.split("\\t")
-            def g(col, dflt=""):
-                return f[idx[col]] if col in idx and idx[col] < len(f) else dflt
-            fname = g("FusionName")
-            if "--" in fname:
-                g5, g3 = fname.split("--")[0], fname.split("--")[1]
-            else:
-                g5, g3 = g("LeftGene"), g("RightGene")
-            g5, g3 = norm_gene(g5), norm_gene(g3)
-            if not g5 or not g3: continue
-            lb, rb = parse_bp(g("LeftBreakpoint")), parse_bp(g("RightBreakpoint"))
-            bp5, bp3 = f"{lb[0]}:{lb[1]}", f"{rb[0]}:{rb[1]}"
-            sup = 0
-            for c in ("JunctionReadCount", "SpanningFragCount"):
-                try: sup += int(float(g(c, "0") or 0))
-                except Exception: pass
-            add(store, canon_key(g5, g3), g5, g3, bp5, bp3, "starfusion", sup, {})
-except FileNotFoundError:
-    pass
-
-# ---- FusionCatcher (tab; long header) ----
-try:
-    with open("fusioncatcher.txt") as fh:
-        rows = [l.rstrip("\\n") for l in fh if l.strip()]
-    if rows:
-        hdr = rows[0].split("\\t")
-        def find(sub):
-            for i, h in enumerate(hdr):
-                if sub in h: return i
-            return -1
-        i_g1, i_g2 = find("Gene_1_symbol"), find("Gene_2_symbol")
-        i_b1, i_b2 = find("Fusion_point_for_gene_1"), find("Fusion_point_for_gene_2")
-        i_sp, i_su = find("Spanning_pairs"), find("Spanning_unique_reads")
-        for line in rows[1:]:
-            f = line.split("\\t")
-            if i_g1 < 0 or i_g2 < 0 or max(i_g1, i_g2) >= len(f): continue
-            g5, g3 = norm_gene(f[i_g1]), norm_gene(f[i_g2])
-            if not g5 or not g3: continue
-            b1 = parse_bp(f[i_b1]) if 0 <= i_b1 < len(f) else ("", "")
-            b2 = parse_bp(f[i_b2]) if 0 <= i_b2 < len(f) else ("", "")
-            bp5, bp3 = f"{b1[0]}:{b1[1]}", f"{b2[0]}:{b2[1]}"
-            sup = 0
-            for i_c in (i_sp, i_su):
-                if 0 <= i_c < len(f):
-                    try: sup += int(float(f[i_c] or 0))
-                    except Exception: pass
-            add(store, canon_key(g5, g3), g5, g3, bp5, bp3, "fusioncatcher", sup, {})
-except FileNotFoundError:
-    pass
-
-# ---- known oncogenic fusions (order-insensitive pair set) ----
-known = set()
-if KNOWN_PATH != "NONE":
-    try:
-        with open(KNOWN_PATH) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"): continue
-                parts = split_pair(line)
-                if len(parts) >= 2:
-                    known.add("--".join(sorted([norm_gene(parts[0]), norm_gene(parts[1])])))
-                else:
-                    sys.stderr.write(f"WARN known_fusions: unparsed line (use TAB or '--'): {line}\\n")
-    except FileNotFoundError:
-        pass
-
-def same_chrom_close(bp5, bp3):
-    try:
-        c5, p5 = bp5.split(":"); c3, p3 = bp3.split(":")
-        return c5 == c3 and c5 != "" and abs(int(p5) - int(p3)) <= READTHRU_BP
-    except Exception:
-        return False
-
-# ---- verdicts ----
-out_rows = []
-n_pass = n_known = n_review = 0
-for key, d in store.items():
-    g5, g3 = d["genes"]
-    ncall = len(d["callers"])
-    is_known = key in known
-    arriba_type = (d.get("type") or "").lower()
-    readthrough = ("read_through" in arriba_type or "read-through" in arriba_type
-                   or same_chrom_close(d["bp5"], d["bp3"]))
-    if ncall >= MIN_CALLERS:
-        verdict = "PASS_CONSENSUS"; n_pass += 1
-    elif is_known and ncall >= 1:
-        verdict = "PASS_KNOWN"; n_known += 1
-    else:
-        verdict = "REVIEW"; n_review += 1
-    out_rows.append([
-        f"{g5}--{g3}", g5, g3, d["bp5"], d["bp3"],
-        ",".join(sorted(d["callers"])), str(ncall), str(d["support"]),
-        d["arriba_conf"] or ".", "yes" if is_known else "no",
-        "yes" if readthrough else "no", verdict
-    ])
-
-# sort: PASS_CONSENSUS, PASS_KNOWN, REVIEW; then by caller count / support desc
-order = {"PASS_CONSENSUS": 0, "PASS_KNOWN": 1, "REVIEW": 2}
-out_rows.sort(key=lambda r: (order.get(r[11], 3), -int(r[6]), -int(r[7])))
-
-with open(f"{SAMPLE}_fusion_consensus.tsv", "w", newline="") as out:
-    w = csv.writer(out, delimiter="\\t")
-    w.writerow(["FusionName","Gene5","Gene3","Breakpoint5","Breakpoint3",
-                "Callers","NumCallers","TotalSupport","Arriba_Confidence",
-                "KnownFusion","ReadThrough","Verdict"])
-    w.writerows(out_rows)
-
-# FusionInspector candidate list = confident set only (PASS_*), directional "A--B"
-with open(f"{SAMPLE}_fusion_candidates.txt", "w") as out:
-    seen = set()
-    for r in out_rows:
-        if r[11].startswith("PASS") and r[0] not in seen:
-            out.write(r[0] + "\\n"); seen.add(r[0])
-
-with open(f"{SAMPLE}_fusion_consensus_stats.txt", "w") as out:
-    out.write(f"sample_id\\t{SAMPLE}\\n")
-    out.write(f"total_unique_fusions\\t{len(store)}\\n")
-    out.write(f"pass_consensus\\t{n_pass}\\n")
-    out.write(f"pass_known_single_caller\\t{n_known}\\n")
-    out.write(f"review_only\\t{n_review}\\n")
-    out.write(f"min_callers\\t{MIN_CALLERS}\\n")
-PYEOF
-
-    PY=\$(command -v python3 || echo /opt/conda/bin/python3)
-    "\$PY" fusion_consensus.py ${min_callers} ${readthru_kb} ${known_arg} ${meta.sample_id}
-
-    # never let an empty candidate list crash FusionInspector downstream
-    if [ ! -s ${meta.sample_id}_fusion_candidates.txt ]; then
-        printf '' > ${meta.sample_id}_fusion_candidates.txt
-    fi
+    fusion_consensus.sh ${meta.sample_id} ${min_callers} ${readthru_kb} ${known_arg} ${gtf} ${ctat_gtf}
     """
 }
 
 
 // ============================================================
-//  STAGE 5E: In-silico validation - FusionInspector  (analog of a "filter")
+//  STAGE 5 variant_calling: FILTER_FUSION_CANDIDATES - FusionInspector candidates present in the CTAT annotation
 //
 //  Filter unknown genes to avoid FusionInspector crash
 // ============================================================
+
 process FILTER_FUSION_CANDIDATES {
     tag "${meta.sample_id}"
     label 'process_low'
@@ -742,40 +492,13 @@ process FILTER_FUSION_CANDIDATES {
 
     script:
     """
-    set -euo pipefail
-
-    # Early exit if input candidates file is missing or empty
-    if [ ! -s "${candidates}" ]; then
-        touch "${meta.sample_id}_filtered_candidates.txt"
-        exit 0
-    fi
-
-    # 1. Extract all valid gene names/IDs directly from CTAT GTF
-    gtf_file=\$(find -L "${ctat_lib}" -name "ref_annot.gtf" | head -n1)
-    awk -F'\\t' '\$3 == "gene" || \$3 == "exon" { print \$9 }' "\$gtf_file" \\
-        | grep -oE '(gene_id|gene_name|gene_symbol) "[^"]+"' \\
-        | cut -d'"' -f2 \\
-        | sort -u > valid_genes.txt
-
-    # 2. Filter out rows containing unannotated genes
-    awk -F'\\t' -v gtf="valid_genes.txt" '
-        BEGIN { while ((getline line < gtf) > 0) valid[line] = 1 }
-        /^#/ { print; next }
-        {
-            split(\$1, genes, "--")
-            # If line is gene pair (GENE1--GENE2), ensure both exist in GTF
-            if (length(genes) > 1) {
-                if ((genes[1] in valid) && (genes[2] in valid)) print \$0
-            } else if (\$1 in valid) {
-                print \$0
-            }
-        }
-    ' "${candidates}" > "${meta.sample_id}_filtered_candidates.txt"
+    filter_fusion_candidates.sh ${candidates} ${ctat_lib} ${meta.sample_id}_filtered_candidates.txt
     """
 }
 
+
 // ============================================================
-//  STAGE 5E: In-silico validation - FusionInspector  (analog of a "filter")
+//  STAGE 5 variant_calling: FUSIONINSPECTOR - in-silico fusion validation - FusionInspector
 //
 //  Re-aligns reads to the consensus candidate fusion contigs and reports
 //  per-fusion supporting evidence (junction/spanning reads, FFPM), the
@@ -783,6 +506,7 @@ process FILTER_FUSION_CANDIDATES {
 //  candidate list is validated (bounded runtime). Skips gracefully when the
 //  candidate list is empty.
 // ============================================================
+
 process FUSIONINSPECTOR {
     tag { "${meta.sample_id}" }
     label 'process_fusion_validate'
@@ -827,11 +551,19 @@ process FUSIONINSPECTOR {
         --CPU ${task.cpus} \\
         -O fi_out
 
-    if [ -s fi_out/FI.fusion_predictions.final.abridged.tsv ]; then
-        cp fi_out/FI.fusion_predictions.final.abridged.tsv ${meta.sample_id}_fusioninspector.tsv
-    elif [ -s fi_out/finspector.FusionInspector.fusions.abridged.tsv ]; then
-        cp fi_out/finspector.FusionInspector.fusions.abridged.tsv ${meta.sample_id}_fusioninspector.tsv
+    # FusionInspector names its table <out_prefix>.FusionInspector.fusions.abridged.tsv
+    # (here FI.*). The first match wins; the older names are kept as fallbacks.
+    fi_tsv=""
+    for cand in fi_out/FI.FusionInspector.fusions.abridged.tsv \\
+                fi_out/FI.fusion_predictions.final.abridged.tsv \\
+                fi_out/finspector.FusionInspector.fusions.abridged.tsv; do
+        if [ -s "\$cand" ]; then fi_tsv="\$cand"; break; fi
+    done
+    if [ -n "\$fi_tsv" ]; then
+        cp "\$fi_tsv" ${meta.sample_id}_fusioninspector.tsv
     else
+        echo "WARN: no FusionInspector abridged table found in fi_out/ - writing header-only result" >&2
+        ls fi_out >&2 || true
         printf '#FusionName\\tJunctionReadCount\\tSpanningFragCount\\tFFPM\\tannots\\n' \\
             > ${meta.sample_id}_fusioninspector.tsv
     fi
@@ -840,198 +572,163 @@ process FUSIONINSPECTOR {
     """
 }
 
+
 // ============================================================
-//  STAGE 6: Fusion annotation + pre-classification
+//  STAGE 5 variant_calling: RNA_IMMUNE_PREP - BAM preparation for TRUST4 and Telescope
+//
+//  STAR BAM or archived CRAM in; coordinate BAM (TRUST4) and collated BAM (Telescope) out.
+// ============================================================
+
+process RNA_IMMUNE_PREP {
+    tag { "${meta.sample_id}" }
+    label 'process_medium'
+
+    input:
+    tuple val(meta), path(aln), path(idx)
+    path  ref_fasta
+    path  ref_fai
+
+    output:
+    tuple val(meta), path("${meta.sample_id}.coord.bam"),    emit: coord
+    tuple val(meta), path("${meta.sample_id}.collated.bam"), emit: collated
+
+    script:
+    def is_cram = aln.name.endsWith('.cram')
+    """
+    set -euo pipefail
+
+    ${ is_cram
+        ? "samtools view -@ ${task.cpus} -T ${ref_fasta} -b -o ${meta.sample_id}.coord.bam ${aln}"
+        : "ln -s ${aln} ${meta.sample_id}.coord.bam" }
+
+    samtools collate -@ ${task.cpus} --reference ${ref_fasta} \\
+        -o ${meta.sample_id}.collated.bam ${aln} \$PWD/collate_tmp
+    """
+}
+
+
+// ============================================================
+//  STAGE 5 variant_calling: TRUST4 - TCR/BCR repertoire - TRUST4
+// ============================================================
+
+process TRUST4 {
+    tag { "${meta.sample_id}" }
+    label 'process_medium'
+
+    memory { 16.GB * task.attempt }
+    time   { 9.h   * task.attempt }
+
+    // -- 05 variant_calling ---------------------------------------------
+    publishDir { "${pubDir('variant_calling', true)}/trust4" }, mode: 'copy',
+        pattern: '*{_report.tsv,_airr.tsv}'
+
+    input:
+    tuple val(meta), path(bam)
+    path  trust4_ref_dir
+
+    output:
+    tuple val(meta), path("${meta.sample_id}_report.tsv"), emit: report
+    path  "${meta.sample_id}_airr.tsv", optional: true,     emit: airr
+
+    script:
+    """
+    set -euo pipefail
+
+    run-trust4 \\
+        -b ${bam} \\
+        -f ${trust4_ref_dir}/hg38_bcrtcr.fa \\
+        --ref ${trust4_ref_dir}/human_IMGT+C.fa \\
+        --abnormalUnmapFlag \\
+        -t ${task.cpus} \\
+        -o ${meta.sample_id}
+    """
+}
+
+
+// ============================================================
+//  STAGE 5 variant_calling: TELESCOPE - HERV expression - Telescope
+// ============================================================
+
+process TELESCOPE {
+    tag { "${meta.sample_id}" }
+    label 'process_medium'
+
+    // -- 05 variant_calling ---------------------------------------------
+    publishDir { "${pubDir('variant_calling', true)}/telescope" }, mode: 'copy',
+        pattern: '*-telescope_report.tsv'
+
+    input:
+    tuple val(meta), path(collated_bam)
+    path  herv_gtf
+
+    output:
+    tuple val(meta), path("${meta.sample_id}-telescope_report.tsv"), emit: report
+
+    script:
+    """
+    set -euo pipefail
+
+    telescope assign \\
+        --outdir . \\
+        --exp_tag ${meta.sample_id} \\
+        --theta_prior 200000 --max_iter 200 \\
+        ${collated_bam} ${herv_gtf}
+    """
+}
+
+
+// ============================================================
+//  STAGE 6 annotation: ANNOTATE_FUSIONS - fusion annotation and tiers
 //
 //  Joins consensus fusions (+ FusionInspector confirmation) to a known-fusion
 //  catalog (params.known_fusions_tsv) and the COSMIC Cancer Gene Census
 //  (params.cosmic_cgc_tsv, reused from the DNA arm) to assign a computational
 //  tier - the fusion analog of CLASSIFY_VARIANTS. NOT a final clinical call.
 // ============================================================
+
 process ANNOTATE_FUSIONS {
     tag { "${meta.sample_id}" }
     label 'process_low'
 
     // -- 06 annotation --------------------------------------------------
     publishDir { "${pubDir('annotation', true)}" }, mode: 'copy'
-    
+
 
     input:
     tuple val(meta),
           path(consensus,       stageAs: 'consensus.tsv'),
-          path(fusioninspector, stageAs: 'fi.tsv')
-    path  cgc_tsv
-    path  known_fusions_tsv
+          path(fusioninspector, stageAs: 'fi.tsv'),
+          path(names,           stageAs: 'names.tsv')
+    path  cgc_tsv,           stageAs: 'cgc_ref/*'
+    path  known_fusions_tsv, stageAs: 'known_ref/*'
 
     output:
     tuple val(meta), path("${meta.sample_id}_fusions_annotated.tsv"), emit: annotated
 
     script:
     def cgc_arg    = cgc_tsv ? "cgc.tsv" : 'NONE'
-    def known_arg  = known_fusions_tsv ? "known.tsv" : 'NONE'
+    def known_arg  = known_fusions_tsv ? "${known_fusions_tsv}" : 'NONE'
     // Resolve .gz-ness in Groovy (avoids fragile shell filename tests).
     def cgc_prep   = !cgc_tsv ? '' :
                      (cgc_tsv.name.endsWith('.gz') ? "zcat ${cgc_tsv} > cgc.tsv" : "cp ${cgc_tsv} cgc.tsv")
-    def known_prep = known_fusions_tsv ? "cp ${known_fusions_tsv} known.tsv" : ''
     def min_known  = (params.fusion_known_min_reads != null) ? params.fusion_known_min_reads : 3
     """
     set -euo pipefail
     ${cgc_prep}
-    ${known_prep}
 
-    cat > annotate_fusions.py <<'PYEOF'
-#!/usr/bin/env python3
-import sys, re
-
-CGC_PATH   = sys.argv[1]
-KNOWN_PATH = sys.argv[2]
-SAMPLE     = sys.argv[3]
-
-def norm_gene(g):
-    g = str(g or "").strip().upper().split('^')[0]
-    return re.sub(r'\\(.*?\\)', '', g).strip()
-
-def split_pair(line):
-    # Separators: TAB, '--', comma, semicolon, space. A single hyphen is a separator
-    # ONLY when the line has exactly one ('BCR-ABL1'); symbols such as NKX2-1 / HLA-A
-    # contain hyphens, so 'A--B' or TAB is required for those.
-    parts = [p for p in re.split(r'[\\t,; ]+|--', line) if p]
-    if len(parts) == 1 and parts[0].count('-') == 1:
-        parts = parts[0].split('-')
-    return parts
-
-# CGC gene -> role (col layout matches the DNA CLASSIFY_VARIANTS usage:
-# col1=symbol, col15=role_in_cancer). Robust to header presence.
-role = {}
-if CGC_PATH != "NONE":
-    # Columns located by HEADER NAME (CGC layouts differ between releases).
-    with open(CGC_PATH) as fh:
-        lines = [l.rstrip("\\n").split("\\t") for l in fh if l.strip()]
-    if lines:
-        hdr_cgc = [re.sub(r"\\s+", "_", x.strip().upper()) for x in lines[0]]
-        if "GENE_SYMBOL" not in hdr_cgc or "ROLE_IN_CANCER" not in hdr_cgc:
-            sys.exit("ERROR: CGC header lacks GENE_SYMBOL / ROLE_IN_CANCER: " + " | ".join(lines[0]))
-        gi, ri = hdr_cgc.index("GENE_SYMBOL"), hdr_cgc.index("ROLE_IN_CANCER")
-        for f in lines[1:]:
-            if len(f) > max(gi, ri) and f[gi]:
-                role[norm_gene(f[gi])] = f[ri]
-
-known = set()
-if KNOWN_PATH != "NONE":
-    try:
-        with open(KNOWN_PATH) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"): continue
-                parts = split_pair(line)
-                if len(parts) >= 2:
-                    known.add("--".join(sorted([norm_gene(parts[0]), norm_gene(parts[1])])))
-    except FileNotFoundError:
-        pass
-
-# FusionInspector confirmation set (directional A--B, upper). fi.tsv is staged only
-# when FusionInspector ran for this sample.
-import os
-FI_RAN    = os.path.exists("fi.tsv")
-MIN_KNOWN = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
-confirmed = {}
-try:
-    with open("fi.tsv") as fh:
-        rows = [l.rstrip("\\n") for l in fh if l.strip()]
-    if rows:
-        hdr = rows[0].lstrip("#").split("\\t")
-        idx = {h: i for i, h in enumerate(hdr)}
-        for line in rows[1:]:
-            f = line.split("\\t")
-            name = f[idx["FusionName"]] if "FusionName" in idx and idx["FusionName"] < len(f) else ""
-            name = "--".join(norm_gene(x) for x in name.split("--")) if "--" in name else norm_gene(name)
-            jrc = f[idx["JunctionReadCount"]] if "JunctionReadCount" in idx and idx["JunctionReadCount"] < len(f) else "0"
-            confirmed[name] = jrc
-except FileNotFoundError:
-    pass
-
-IG_HLA = re.compile(r'^(IGH|IGK|IGL|TRA|TRB|TRG|TRD|HLA)')
-
-out = []
-with open("consensus.tsv") as fh:
-    rows = [l.rstrip("\\n") for l in fh if l.strip()]
-hdr = rows[0].split("\\t") if rows else []
-cidx = {h: i for i, h in enumerate(hdr)}
-def col(f, name, d=""):
-    return f[cidx[name]] if name in cidx and cidx[name] < len(f) else d
-
-for line in rows[1:]:
-    f = line.split("\\t")
-    g5, g3 = norm_gene(col(f, "Gene5")), norm_gene(col(f, "Gene3"))
-    key = "--".join(sorted([g5, g3]))
-    dirname = f"{g5}--{g3}"
-    verdict = col(f, "Verdict")
-    readthrough = col(f, "ReadThrough") == "yes"
-    is_known = key in known or col(f, "KnownFusion") == "yes"
-    r5, r3 = role.get(g5, ""), role.get(g3, "")
-    in_cgc = bool(r5) or bool(r3)
-    fi_reads = confirmed.get(dirname, confirmed.get(key, ""))
-    fi_confirmed = "yes" if (fi_reads not in ("", None) and str(fi_reads).strip() not in ("", "0")) else "no"
-    ig_hla = bool(IG_HLA.match(g5) or IG_HLA.match(g3))
-
-    # tiering (computational; for pathologist review - not a final AMP/CAP tier)
-    # A catalogued pair needs real support: multi-caller consensus, OR a single-caller
-    # known rescue with >= MIN_KNOWN reads AND FusionInspector confirmation when FI ran
-    # (1-read single-caller hits are typical of index hopping / cross-sample bleed).
-    try:
-        support = float(col(f, "TotalSupport", "0") or 0)
-    except ValueError:
-        support = 0.0
-    known_supported = (verdict == "PASS_CONSENSUS") or (
-        verdict.startswith("PASS") and support >= MIN_KNOWN and (not FI_RAN or fi_confirmed == "yes"))
-    if is_known and known_supported:
-        tier = "KNOWN_ONCOGENIC"
-    elif is_known:
-        tier = "KNOWN_LOW_SUPPORT"
-    elif readthrough or ig_hla:
-        tier = "LIKELY_ARTIFACT"
-    elif in_cgc and verdict == "PASS_CONSENSUS":
-        tier = "LIKELY_ONCOGENIC"
-    elif verdict == "PASS_CONSENSUS":
-        tier = "VUS"
-    else:
-        tier = "LOW_CONFIDENCE"
-
-    out.append([
-        dirname, g5, g3, col(f, "Breakpoint5"), col(f, "Breakpoint3"),
-        col(f, "Callers"), col(f, "NumCallers"), col(f, "TotalSupport"),
-        col(f, "Arriba_Confidence"), "yes" if is_known else "no",
-        "yes" if in_cgc else "no", (r5 or ".") + "|" + (r3 or "."),
-        "yes" if readthrough else "no", "yes" if ig_hla else "no",
-        fi_confirmed, fi_reads or ".", verdict, tier
-    ])
-
-order = {"KNOWN_ONCOGENIC":0,"LIKELY_ONCOGENIC":1,"KNOWN_LOW_SUPPORT":2,
-         "VUS":3,"LOW_CONFIDENCE":4,"LIKELY_ARTIFACT":5}
-out.sort(key=lambda r: (order.get(r[17], 9), r[0]))
-
-with open(f"{SAMPLE}_fusions_annotated.tsv", "w") as o:
-    o.write("# COMPUTATIONAL FUSION PRE-CLASSIFICATION - NOT A FINAL AMP/ASCO/CAP CLINICAL TIER\\n")
-    o.write("# Final tiering requires a curated knowledge base (OncoKB/CIViC/COSMIC) + expert review.\\n")
-    o.write("\\t".join([
-        "FusionName","Gene5","Gene3","Breakpoint5","Breakpoint3","Callers","NumCallers",
-        "TotalSupport","Arriba_Confidence","KnownFusion","In_CGC","CGC_Roles(5|3)",
-        "ReadThrough","IG_HLA_Locus","FI_Confirmed","FI_JunctionReads","Verdict","TIER"
-    ]) + "\\n")
-    for r in out:
-        o.write("\\t".join(r) + "\\n")
-PYEOF
 
     PY=\$(command -v python3 || echo /opt/conda/bin/python3)
-    "\$PY" annotate_fusions.py ${cgc_arg} ${known_arg} ${meta.sample_id} ${min_known}
+    "\$PY" "\$(command -v annotate_fusions.py)" ${cgc_arg} ${known_arg} ${meta.sample_id} ${min_known}
     """
 }
 
 
 // ============================================================
-//  STAGE 7: Per-patient consolidated fusion report
+//  STAGE 7 classification: CONSOLIDATE_FUSION_REPORT - consolidated fusion report per patient
+//
 //  (analog of CONSOLIDATE_PATIENT_REPORT)
 // ============================================================
+
 process CONSOLIDATE_FUSION_REPORT {
     tag { patient_id }
     label 'process_low'
@@ -1049,30 +746,6 @@ process CONSOLIDATE_FUSION_REPORT {
 
     script:
     """
-    set -uo pipefail
-    REPORT=${patient_id}_fusion_report.tsv
-
-    {
-      echo "## ============================================================"
-      echo "## CONSOLIDATED RNA FUSION REPORT - PATIENT: ${patient_id}   (RNA sample: ${sample_id})"
-      echo "## Generated: \$(date '+%Y-%m-%d %H:%M:%S')"
-      echo "## NOTE: computational summary for review; not a final clinical tier."
-      echo "## ============================================================"
-    } > \$REPORT
-
-    printf '\\n## [1] CALLING SUMMARY\\n' >> \$REPORT
-    if [ -s consensus_stats.txt ]; then cat consensus_stats.txt >> \$REPORT; else echo "(no stats)" >> \$REPORT; fi
-
-    printf '\\n## [2] PRIORITISED FUSIONS (KNOWN_ONCOGENIC / LIKELY_ONCOGENIC first)\\n' >> \$REPORT
-    if [ -s annotated.tsv ]; then
-        # header + high-tier calls first, then the rest, artifacts last
-        grep -E '^FusionName' annotated.tsv >> \$REPORT || true
-        grep -E 'KNOWN_ONCOGENIC|LIKELY_ONCOGENIC' annotated.tsv >> \$REPORT || true
-    else
-        echo "(no fusion calls)" >> \$REPORT
-    fi
-
-    printf '\\n## [3] ALL CONSENSUS FUSIONS (full annotated table)\\n' >> \$REPORT
-    if [ -s annotated.tsv ]; then grep -v '^#' annotated.tsv >> \$REPORT; else echo "(none)" >> \$REPORT; fi
+    fusion_report.sh ${patient_id} ${sample_id} consensus_stats.txt annotated.tsv
     """
 }

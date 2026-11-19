@@ -1,0 +1,80 @@
+# ==============================================================================
+#  PAPIO - germline WES (single sample)
+#  Demo data: SEQC2 HCC1395BL (normal) - samplesheets/dna_germline.csv
+#
+#  1. bash scripts/download_demo_fastq.sh /path/to/demo
+#  2. edit every /path/to/... below
+#  3. bash scripts/check_installation.sh params/params_germline.yaml
+#  4. nextflow run main.nf -params-file params/params_germline.yaml           # LSF (default)
+#     add  -profile slurm  or  -profile local  on other systems
+# ==============================================================================
+
+# ---- run paths ---------------------------------------------------------------
+pipeline_root   : /path/to/PAPIO
+work_root       : /path/to/run/germline_demo
+outdir          : /path/to/run/germline_demo/Result
+container_dir   : /path/to/papio_containers
+bind_paths      : ['/path/to/papio_resources', '/path/to/run', '/path/to/demo']
+
+# ---- input -------------------------------------------------------------------
+fastq_root      : /path/to/demo/fastq
+dna_samplesheet : /path/to/demo/samplesheets/dna_germline.csv
+
+# ---- mode --------------------------------------------------------------------
+assay              : wes
+analysis           : germline
+start_at           : mapping
+stop_at            : classification
+dedup_mode         : markdup     # demo libraries have no UMIs
+umi_read_structure : null
+bqsr               : false
+
+germline_caller : haplotypecaller   # haplotypecaller | deepvariant
+germline_filter : nv                # nv = single-sample CNN scoring; vqsr needs >= 30 samples
+run_gcnv        : false             # gCNV needs a cohort of >= 30 normals; off for a single sample
+run_roh         : true              # gated off automatically for WES (roh_allow_wes: false)
+
+# ---- reference genome (GRCh38.d1.vd1) ----------------------------------------
+ref_index_dir   : /path/to/papio_resources/genome/bwa_mem2
+ref_fasta       : /path/to/papio_resources/genome/GRCh38.d1.vd1.fa
+ref_fai         : /path/to/papio_resources/genome/GRCh38.d1.vd1.fa.fai
+ref_dict        : /path/to/papio_resources/genome/GRCh38.d1.vd1.dict
+dbsnp           : /path/to/papio_resources/gatk/Homo_sapiens_assembly38.dbsnp138.vcf.gz
+mills           : /path/to/papio_resources/gatk/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
+known_indels    : /path/to/papio_resources/gatk/Homo_sapiens_assembly38.known_indels.vcf.gz
+hapmap          : /path/to/papio_resources/gatk/hapmap_3.3.hg38.vcf.gz
+omni            : /path/to/papio_resources/gatk/1000G_omni2.5.hg38.vcf.gz
+thousandg_snps  : /path/to/papio_resources/gatk/1000G_phase1.snps.high_confidence.hg38.vcf.gz
+
+# ---- capture kit: Agilent SureSelect V6+UTR (S07604624) - demo ---------------
+interval_bed         : /path/to/papio_resources/capture/S07604624/S07604624_Covered.bed
+bait_interval_list   : /path/to/papio_resources/capture/S07604624/S07604624_Padded.interval_list
+target_interval_list : /path/to/papio_resources/capture/S07604624/S07604624_Covered.interval_list
+call_regions_gz      : /path/to/papio_resources/capture/S07604624/S07604624_pad100.bed.gz
+scatter_intervals    : /path/to/papio_resources/capture/S07604624/Scatter_Intervals_Dir_pad100
+
+# ---- capture kit: Agilent SureSelect V7 (S31285117) - own cohort -------------
+# interval_bed         : /path/to/papio_resources/capture/S31285117/S31285117_Covered.bed
+# bait_interval_list   : /path/to/papio_resources/capture/S31285117/S31285117_Padded.interval_list
+# target_interval_list : /path/to/papio_resources/capture/S31285117/S31285117_Covered.interval_list
+# call_regions_gz      : /path/to/papio_resources/capture/S31285117/S31285117_pad100.bed.gz
+# scatter_intervals    : /path/to/papio_resources/capture/S31285117/Scatter_Intervals_Dir_pad100
+
+# ---- QC ----------------------------------------------------------------------
+verifybamid_db : /path/to/papio_resources/verifybamid2/1000g.phase3.100k.b38
+somalier_sites : /path/to/papio_resources/somalier/sites.hg38.vcf.gz
+somalier_ancestry_labels : /path/to/papio_resources/somalier/ancestry-labels-1kg.tsv   # ancestry of normals (optional)
+somalier_1kg_dir         : /path/to/papio_resources/somalier/1kg-somalier
+coverage_report_bed      : /path/to/papio_resources/annotation/reportable_genes_MANE_CDS.bed   # per-gene coverage of reportable genes
+
+# ---- annotation + report -----------------------------------------------------
+vep_cache_dir     : /path/to/papio_resources/vep_cache
+vep_cache_version : 115
+vep_plugins_dir   : /path/to/papio_resources/vep_plugins
+clinvar_vcf       : /path/to/papio_resources/clinvar/clinvar_YYYYMMDD.vcf.gz
+gnomad_faf_vcf    : /path/to/papio_resources/annotation/variantsGnomADv4.1Joint.vcf.bgz   # gnomAD v4.1 filtering AF (README Appendix A, step 7.6)
+germline_report_genes : /path/to/papio_resources/annotation/reportable_genes.txt   # germline LoF report gene list (edit for your study)
+annotsv_dir       : /path/to/papio_resources/annotsv
+
+# ---- scheduler ---------------------------------------------------------------
+lsf_project : null

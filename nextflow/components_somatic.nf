@@ -5,14 +5,14 @@ nextflow.enable.dsl = 2
 include { gatkJavaOpts; pubDir } from './utils'
 
 // ============================================================
-//  components.nf  -  All Process Definitions
+//  components_somatic.nf  -  Somatic (tumor-normal) process definitions
 // ============================================================
 
 
+// ============================================================
+//  STAGE 5 variant_calling: MANTA - somatic SVs and candidate indels - Manta
+// ============================================================
 
-// ============================================================
-//  STAGE 5A: SV - Manta somatic (tumor-normal)
-// ============================================================
 process MANTA {
     tag { "${meta.sample_id}" }
     label 'process_variant'
@@ -68,8 +68,9 @@ process MANTA {
 
 
 // ============================================================
-//  STAGE 5B-SNV/INDEL: SOMATIC - Strelka2
+//  STAGE 5 variant_calling: STRELKA2 - somatic SNVs/indels - Strelka2
 // ============================================================
+
 process STRELKA2 {
     tag { "${meta.sample_id}" }
     label 'process_strelka'
@@ -114,7 +115,7 @@ process STRELKA2 {
     # Strelka (Illumina workflow) expects <bam>.bai; our index is <sample>_markdup.bai.
     if [ ! -f "${tumour_bam}.bai" ]; then ln -s ${tumour_bai} "${tumour_bam}.bai"; fi
     if [ ! -f "${normal_bam}.bai" ]; then ln -s ${normal_bai} "${normal_bam}.bai"; fi
-    
+
     configureStrelkaSomaticWorkflow.py \\
         --tumorBam       ${tumour_bam} \\
         --normalBam      ${normal_bam} \\
@@ -137,15 +138,15 @@ process STRELKA2 {
 
 
 // ============================================================
-//  STAGE 5C Add STRELKA AF: SOMATIC - Format AF for strelka output
+//  STAGE 5 variant_calling: TAG_STRELKA_AF - Strelka2 AD/AF fields
+//
+//  Inject standard AF/AD FORMAT fields into Strelka2 somatic VCFs.
+//  Strelka does not emit AF/AD natively. Per Strelka's user guide:
+//    SNVs:   tier1 ref/alt counts come from FORMAT/{A,C,G,T}U (field matching
+//            REF/ALT base), tier1 = first comma-delimited value.
+//    Indels: tier1 ref/alt counts come from FORMAT/TAR (ref) and FORMAT/TIR (alt).
+//    AF = alt_tier1 / (alt_tier1 + ref_tier1)
 // ============================================================
-
-// Inject standard AF/AD FORMAT fields into Strelka2 somatic VCFs.
-// Strelka does not emit AF/AD natively. Per Strelka's user guide:
-//   SNVs:   tier1 ref/alt counts come from FORMAT/{A,C,G,T}U (field matching
-//           REF/ALT base), tier1 = first comma-delimited value.
-//   Indels: tier1 ref/alt counts come from FORMAT/TAR (ref) and FORMAT/TIR (alt).
-//   AF = alt_tier1 / (alt_tier1 + ref_tier1)
 
 process TAG_STRELKA_AF {
     tag { "${meta.sample_id}" }
@@ -170,66 +171,9 @@ process TAG_STRELKA_AF {
     """
     set -euo pipefail
 
-    cat > strelka_add_af.py <<'PYEOF'
-#!/usr/bin/env python3
 
-import sys
-import pysam
-
-def main():
-    vcf_in, vcf_out, variant_type = sys.argv[1], sys.argv[2], sys.argv[3]
-    assert variant_type in ("snv", "indel"), "variant_type must be 'snv' or 'indel'"
-
-    vcf = pysam.VariantFile(vcf_in)
-    vcf.header.formats.add("AD", ".", "Integer",
-        "Allelic depths (ref,alt); tier1 counts derived from Strelka U/TAR-TIR fields")
-    vcf.header.formats.add("AF", "1", "Float",
-        "Allele frequency; tier1 alt/(tier1 alt+tier1 ref), derived per Strelka user guide")
-
-    out = pysam.VariantFile(vcf_out, "w", header=vcf.header)
-    base_field = {"A": "AU", "C": "CU", "G": "GU", "T": "TU"}
-
-    n_ok, n_fallback = 0, 0
-    for rec in vcf:
-        ref = rec.ref.upper()
-        alt = rec.alts[0].upper() if rec.alts else None
-
-        for sample_name in rec.samples:
-            s = rec.samples[sample_name]
-            ref_t1, alt_t1 = 0, 0
-            try:
-                if variant_type == "snv":
-                    ref_field = base_field.get(ref)
-                    alt_field = base_field.get(alt) if alt else None
-                    if ref_field and ref_field in s and s[ref_field] is not None:
-                        ref_t1 = s[ref_field][0]
-                    if alt_field and alt_field in s and s[alt_field] is not None:
-                        alt_t1 = s[alt_field][0]
-                else:
-                    if "TAR" in s and s["TAR"] is not None:
-                        ref_t1 = s["TAR"][0]
-                    if "TIR" in s and s["TIR"] is not None:
-                        alt_t1 = s["TIR"][0]
-                n_ok += 1
-            except Exception:
-                n_fallback += 1
-
-            denom = ref_t1 + alt_t1
-            af = round(alt_t1 / denom, 4) if denom > 0 else 0.0
-            s["AD"] = (int(ref_t1), int(alt_t1))
-            s["AF"] = af
-
-        out.write(rec)
-
-    out.close()
-    sys.stderr.write(f"strelka_add_af: {n_ok} records tagged OK, {n_fallback} fallback-to-zero\\n")
-
-if __name__ == "__main__":
-    main()
-PYEOF
-
-    python3 strelka_add_af.py ${strelka_snv}   snvs.af.vcf   snv
-    python3 strelka_add_af.py ${strelka_indel} indels.af.vcf indel
+    strelka_add_af.py ${strelka_snv}   snvs.af.vcf   snv
+    strelka_add_af.py ${strelka_indel} indels.af.vcf indel
 
     bgzip -c snvs.af.vcf   > ${meta.sample_id}_strelka2_snvs.af.vcf.gz
     bgzip -c indels.af.vcf > ${meta.sample_id}_strelka2_indels.af.vcf.gz
@@ -238,9 +182,11 @@ PYEOF
     """
 }
 
+
 // ============================================================
-//  STAGE 5D-SNV/INDEL: SOMATIC - MuSE call (per tumor/normal pair)
+//  STAGE 5 variant_calling: MUSE_CALL - somatic SNVs - MuSE call
 // ============================================================
+
 process MUSE_CALL {
     tag { "${meta.sample_id}" }
     label 'process_variant'
@@ -258,10 +204,9 @@ process MUSE_CALL {
     tuple val(meta), path("${meta.sample_id}.MuSE.txt"), emit: call_output
 
     script:
-    def java_opts = gatkJavaOpts(task)
     """
         set -euo pipefail
-        tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_muse_tmp"
+        tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_muse_tmp.XXXXXX")
         mkdir -p "\$tmp_dir"
         trap 'rm -rf "\$tmp_dir"' EXIT
         # MuSE call fits a Markov substitution model per tumor/normal pair and
@@ -278,7 +223,7 @@ process MUSE_CALL {
 
 
 // ============================================================
-//  STAGE 5E-SNV/INDEL: SOMATIC - MuSE sump (per tumor/normal pair)
+//  STAGE 5 variant_calling: MUSE_SUMP - somatic SNVs - MuSE sump
 // ============================================================
 
 process MUSE_SUMP {
@@ -300,12 +245,11 @@ process MUSE_SUMP {
           path("${meta.sample_id}.MuSE.vcf.gz.tbi"), emit: vcf
 
     script:
-    def java_opts = gatkJavaOpts(task)
     def mode_flag = (meta.assay == 'wes') ? '-E' : '-G'
 
     """
     set -euo pipefail
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_muse_sump_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_muse_sump_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
     MuSE sump \\
@@ -319,9 +263,11 @@ process MUSE_SUMP {
     """
 }
 
+
 // ============================================================
-//  STAGE 5F Add AF MUSE: SOMATIC - Format AF for MUSE output
+//  STAGE 5 variant_calling: TAG_MUSE_AF - MuSE AF field
 // ============================================================
+
 process TAG_MUSE_AF {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -343,60 +289,107 @@ process TAG_MUSE_AF {
     """
     set -euo pipefail
 
-    cat > muse_add_af.py <<'PYEOF'
-#!/usr/bin/env python3
-# MuSE emits AD as (ref,alt) but no decimal AF. Compute AF = alt/(ref+alt).
-import sys, pysam
-vcf = pysam.VariantFile(sys.argv[1])
-if "AF" not in vcf.header.formats:
-    vcf.header.formats.add("AF", "1", "Float", "Allele frequency; computed from MuSE AD (alt/(ref+alt))")
-out = pysam.VariantFile(sys.argv[2], "w", header=vcf.header)
-for rec in vcf:
-    for sn in rec.samples:
-        s = rec.samples[sn]
-        af = 0.0
-        try:
-            if "AD" in s and s["AD"] is not None:
-                ad = s["AD"]
-                if isinstance(ad, (tuple, list)) and len(ad) >= 2:
-                    ref_d, alt_d = ad[0] or 0, ad[1] or 0
-                    if (ref_d + alt_d) > 0:
-                        af = round(alt_d / (ref_d + alt_d), 4)
-        except Exception:
-            pass
-        s["AF"] = af
-    out.write(rec)
-out.close()
-PYEOF
 
     bcftools norm -m -any -f ${ref_fasta} -O v ${muse_vcf} > split.vcf
-    python3 muse_add_af.py split.vcf muse.af.vcf
+    muse_add_af.py split.vcf muse.af.vcf
     bgzip -c muse.af.vcf > ${meta.sample_id}_muse.af.vcf.gz
     bcftools index -t ${meta.sample_id}_muse.af.vcf.gz
     """
 }
 
 
+// ============================================================
+//  STAGE 5 variant_calling: VARSCAN - somatic SNVs/indels - VarScan2 (per shard on WGS)
+//
+//  WES: one shard ('all') restricted to the capture BED - identical to the
+//  former single-task run. WGS: one task per scatter shard, because a single
+//  samtools mpileup | varscan pipe is single-threaded and takes days on WGS.
+// ============================================================
 
-// ============================================================
-//  STAGE 5G-SNV/INDEL: SOMATIC - VARSCAN
-// ============================================================
 process VARSCAN {
-    tag { "${meta.sample_id}" }
+    tag { "${meta.sample_id}:${interval_name}" }
     label 'process_variant'
 
     maxRetries    2
+
+    input:
+    tuple val(meta),
+          path(tumor_bam), path(tumor_bai),
+          path(normal_bam), path(normal_bai),
+          val(interval_name), path(interval_file)
+    path  ref_fasta
+    path  ref_fai
+    path  interval_bed
+
+    output:
+    tuple val(meta),
+          path("${meta.sample_id}.${interval_name}.varscan.snp.vcf"),
+          path("${meta.sample_id}.${interval_name}.varscan.indel.vcf"), emit: vcf_chunk
+
+    script:
+    def min_cov     = params.varscan_min_coverage    ?: 8
+    def min_var_frq = params.varscan_min_var_freq    ?: 0.05
+    def somatic_p   = params.varscan_somatic_pvalue  ?: 0.05
+    def prefix      = "${meta.sample_id}.${interval_name}.varscan"
+    // Region: WGS shard (interval_list or BED) | WES capture BED | none.
+    def region_prep = ''
+    def region_flag = ''
+    if (interval_file) {
+        // a BED shard is used as is (copying it to region.bed fails when it is already named so)
+        region_prep = interval_file.name.endsWith('.bed')
+            ? ''
+            : "grep -v '^@' ${interval_file} | awk 'BEGIN{OFS=\"\\t\"} {print \$1, \$2 - 1, \$3}' > region.bed"
+        region_flag = interval_file.name.endsWith('.bed') ? "-l ${interval_file}" : "-l region.bed"
+    } else if (meta.assay == 'wes' && interval_bed) {
+        region_flag = "-l ${interval_bed}"
+    }
+    """
+    set -euo pipefail
+
+    # samtools mpileup expects <bam>.bai; our index is <sample>_markdup.bai.
+    if [ ! -f "${tumor_bam}.bai" ];  then ln -s ${tumor_bai}  "${tumor_bam}.bai";  fi
+    if [ ! -f "${normal_bam}.bai" ]; then ln -s ${normal_bai} "${normal_bam}.bai"; fi
+    ${region_prep}
+
+    # VarScan somatic reads a COMBINED normal+tumor mpileup on stdin (--mpileup 1).
+    # -B (no BAQ), as the VarScan documentation prescribes: BAQ lowers base qualities next
+    # to indels and would hide real somatic SNVs and indel-adjacent alleles from VarScan.
+    samtools mpileup \\
+        -f ${ref_fasta} \\
+        ${region_flag} \\
+        -B -q 20 -Q 20 \\
+        ${normal_bam} ${tumor_bam} \\
+    | varscan somatic \\
+        /dev/stdin \\
+        ${prefix} \\
+        --mpileup 1 \\
+        --min-coverage ${min_cov} \\
+        --min-var-freq ${min_var_frq} \\
+        --somatic-p-value ${somatic_p} \\
+        --output-vcf 1
+
+    # VarScan writes <prefix>.snp.vcf / <prefix>.indel.vcf; guarantee both exist.
+    for kind in snp indel; do
+        [ -e "${prefix}.\${kind}.vcf" ] || : > "${prefix}.\${kind}.vcf"
+    done
+    """
+}
+
+
+// ============================================================
+//  STAGE 5 variant_calling: VARSCAN_MERGE - VarScan2 shards merged in reference order
+// ============================================================
+
+process VARSCAN_MERGE {
+    tag { "${meta.sample_id}" }
+    label 'process_low'
 
     // -- 05 variant_calling (analysis-separated) -----------------------
     publishDir { "${pubDir('variant_calling', true)}/snv/varscan" }, mode: 'copy'
 
     input:
-    tuple val(meta),
-          path(tumor_bam), path(tumor_bai),
-          path(normal_bam), path(normal_bai)
-    path  ref_fasta
+    tuple val(meta), path(snv_chunks), path(indel_chunks)
     path  ref_fai
-    path  interval_bed
 
     output:
     tuple val(meta),
@@ -406,53 +399,19 @@ process VARSCAN {
           path("${meta.sample_id}_varscan_indel.vcf.gz.tbi"), emit: vcf
 
     script:
-    def min_cov     = params.varscan_min_coverage    ?: 8
-    def min_var_frq = params.varscan_min_var_freq    ?: 0.05
-    def somatic_p   = params.varscan_somatic_pvalue  ?: 0.05
-    def region_flag = (meta.assay == 'wes' && interval_bed) ? "-l ${interval_bed}" : ''
+    def snv_list   = (snv_chunks   instanceof List ? snv_chunks   : [snv_chunks]).join(' ')
+    def indel_list = (indel_chunks instanceof List ? indel_chunks : [indel_chunks]).join(' ')
     """
-    set -euo pipefail
-
-    # samtools mpileup expects <bam>.bai; our index is <sample>_markdup.bai.
-    if [ ! -f "${tumor_bam}.bai" ];  then ln -s ${tumor_bai}  "${tumor_bam}.bai";  fi
-    if [ ! -f "${normal_bam}.bai" ]; then ln -s ${normal_bai} "${normal_bam}.bai"; fi
-
-    # VarScan somatic reads a COMBINED normal+tumor mpileup on stdin (--mpileup 1).
-    # Restrict to capture BED for WES (${region_flag}); q20/Q20 baseline quality.
-    samtools mpileup \\
-        -f ${ref_fasta} \\
-        ${region_flag} \\
-        -q 20 -Q 20 \\
-        ${normal_bam} ${tumor_bam} \\
-    | varscan somatic \\
-        /dev/stdin \\
-        ${meta.sample_id}_varscan \\
-        --mpileup 1 \\
-        --min-coverage ${min_cov} \\
-        --min-var-freq ${min_var_frq} \\
-        --somatic-p-value ${somatic_p} \\
-        --output-vcf 1
-
-    # VarScan writes <prefix>.snp.vcf and <prefix>.indel.vcf. Compress+index+rename.
-    for kind in snp indel; do
-        out=\$( [ "\$kind" = "snp" ] && echo snv || echo indel )
-        if [ -s "${meta.sample_id}_varscan.\${kind}.vcf" ]; then
-            bgzip -c "${meta.sample_id}_varscan.\${kind}.vcf" > "${meta.sample_id}_varscan_\${out}.vcf.gz"
-        else
-            # emit a valid empty VCF so downstream staging never fails
-            bcftools view -h "${meta.sample_id}_varscan.\${kind}.vcf" 2>/dev/null \\
-                | bgzip > "${meta.sample_id}_varscan_\${out}.vcf.gz" || \\
-            printf '##fileformat=VCFv4.2\\n#CHROM\\tPOS\\tID\\tREF\\tALT\\tQUAL\\tFILTER\\tINFO\\n' \\
-                | bgzip > "${meta.sample_id}_varscan_\${out}.vcf.gz"
-        fi
-        bcftools index -t "${meta.sample_id}_varscan_\${out}.vcf.gz"
-    done
+    gather_vcf_shards.sh ${meta.sample_id}_varscan_snv.vcf.gz   ${ref_fai} ${snv_list}
+    gather_vcf_shards.sh ${meta.sample_id}_varscan_indel.vcf.gz ${ref_fai} ${indel_list}
     """
 }
 
+
 // ============================================================
-//  STAGE 5H Add AF VARSCAN: SOMATIC - Format AF for VARSCAN output
+//  STAGE 5 variant_calling: TAG_VARSCAN_AF - VarScan2 AD/AF fields
 // ============================================================
+
 process TAG_VARSCAN_AF {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -476,82 +435,15 @@ process TAG_VARSCAN_AF {
 
     script:
     """
-    set -euo pipefail
-
-    cat > varscan_add_af.py <<'PYEOF'
-#!/usr/bin/env python3
-# VarScan: RD=ref depth, AD=alt depth (single value), FREQ="NN.NN%".
-# Header AD is redeclared to Number=R by sed upstream so pysam accepts a
-# (ref,alt) pair. We only WRITE values here; every read defaults None -> 0
-# so no None ever reaches int().
-import sys, pysam
-
-def first_num(x):
-    # unwrap tuple/list, coerce None -> 0
-    if x is None:
-        return 0
-    if isinstance(x, (tuple, list)):
-        x = next((v for v in x if v is not None), 0)
-    return x if x is not None else 0
-
-def main():
-    vcf = pysam.VariantFile(sys.argv[1])
-    if "AF" not in vcf.header.formats:
-        vcf.header.formats.add("AF", "1", "Float",
-            "Allele frequency (0-1); from VarScan FREQ/AD")
-    out = pysam.VariantFile(sys.argv[2], "w", header=vcf.header)
-    for rec in vcf:
-        for sn in rec.samples:
-            s = rec.samples[sn]
-            ref_d, alt_d, af = 0, 0, 0.0
-            try:
-                ref_d = first_num(s.get("RD"))
-                # VarScan AD = ALT count; after Number=R reinterpretation it may
-                # be a tuple with None padding - take last non-None value.
-                ad_raw = s.get("AD")
-                if isinstance(ad_raw, (tuple, list)):
-                    alt_d = next((v for v in reversed(ad_raw) if v is not None), 0)
-                else:
-                    alt_d = ad_raw if ad_raw is not None else 0
-
-                fq = s.get("FREQ")
-                if fq is not None:
-                    fq = fq[0] if isinstance(fq, (tuple, list)) else fq
-                    try:
-                        af = round(float(str(fq).rstrip("%")) / 100.0, 4)
-                    except (ValueError, TypeError):
-                        af = 0.0
-                elif (ref_d + alt_d) > 0:
-                    af = round(alt_d / (ref_d + alt_d), 4)
-            except Exception:
-                pass
-            s["AD"] = (int(ref_d), int(alt_d))
-            s["AF"] = af
-        out.write(rec)
-    out.close()
-
-if __name__ == "__main__":
-    main()
-PYEOF
-
-    for kind in snv indel; do
-        invcf=\$([ "\$kind" = "snv" ] && echo ${varscan_snv} || echo ${varscan_indel})
-        # 1. split multiallelics (VarScan single-value RD/AD can't represent multi-alt)
-        bcftools norm -m -any -f ${ref_fasta} -O v "\$invcf" > \${kind}.split.vcf
-        # 2. fix AD header declaration to Number=R via sed (pysam can't re-add an existing ID)
-        sed 's/##FORMAT=<ID=AD,Number=[0-9A-Za-z.]*,Type=Integer/##FORMAT=<ID=AD,Number=R,Type=Integer/' \\
-            \${kind}.split.vcf > \${kind}.hdrfix.vcf
-        # 3. inject AF + rewrite AD as (ref,alt)
-        python3 varscan_add_af.py \${kind}.hdrfix.vcf \${kind}.af.vcf
-        bgzip -c \${kind}.af.vcf > ${meta.sample_id}_varscan_\${kind}.af.vcf.gz
-        bcftools index -t ${meta.sample_id}_varscan_\${kind}.af.vcf.gz
-    done
+    varscan_tag_af.sh ${meta.sample_id} ${ref_fasta} ${varscan_snv} ${varscan_indel}
     """
 }
 
+
 // ============================================================
-//  STAGE 5J-SNV/INDEL: SOMATIC - Mutect2 (per interval)
+//  STAGE 5 variant_calling: MUTECT2 - somatic SNVs/indels - Mutect2 (per shard)
 // ============================================================
+
 process MUTECT2 {
     tag { "${meta.sample_id}:${interval_name}" }
     label 'process_variant'
@@ -582,13 +474,13 @@ process MUTECT2 {
     script:
     def java_opts = gatkJavaOpts(task)
     def pon_flag    = panel_of_normals ? "--panel-of-normals ${panel_of_normals}" : ''
-    def normal_name = "${meta.patient_id}_N"
+    def normal_name = meta.normal_id
     def gr_flag = germline_resource ? "--germline-resource ${germline_resource}" : ''
 
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_mutect2_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_mutect2_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
 
@@ -608,40 +500,11 @@ process MUTECT2 {
     """
 }
 
-// Use later
-// input:
-//     tuple val(meta), path(tumor_bam), path(tumor_bai), val(interval_name), path(interval)
-//     path(normal_bam)          // real BAM = paired; [] = tumor-only (truthiness, like pon_flag)
-//     path(normal_bai)
-//     path  ref_fasta
-//     path  ref_fai
-//     path  ref_dict
-//     path  panel_of_normals
-//     path  panel_of_normals_tbi
-//     path  germline_resource
-//     path  germline_resource_tbi
-//     // ... outputs unchanged ...
-//     script:
-//     def java_opts = gatkJavaOpts(task)
-//     def pon_flag  = panel_of_normals ? "--panel-of-normals ${panel_of_normals}" : ''
-//     def gr_flag   = germline_resource ? "--germline-resource ${germline_resource}" : ''
-//     def normal_in = normal_bam ? "-I ${normal_bam} -normal ${meta.patient_id}_N" : ''   // <- the whole change
-
-//     """
-//     set -euo pipefail
-//     gatk --java-options "${java_opts}" Mutect2 \\
-//         -R ${ref_fasta} \\
-//         -I ${tumor_bam} ${normal_in} \\
-//         ${pon_flag} \\
-//         ${gr_flag} \\
-//         -L ${interval} \\
-//         --f1r2-tar-gz ${meta.sample_id}.${interval_name}.f1r2.tar.gz \\
-//         -O ${meta.sample_id}.${interval_name}.unfiltered.vcf.gz
-//     """
 
 // ============================================================
-//  STAGE 5K-GATHER: Merge + Filter Mutect2 interval chunks
+//  STAGE 5 variant_calling: MERGE_MUTECT2 - Mutect2 shards merged and FilterMutectCalls
 // ============================================================
+
 process MERGE_MUTECT2 {
     tag { "${meta.sample_id}" }
     label 'process_medium'
@@ -650,7 +513,9 @@ process MERGE_MUTECT2 {
     publishDir { "${pubDir('variant_calling', true)}/snv/mutect2" }, mode: 'copy'
 
     input:
-    tuple val(meta), path(vcf_chunks), path(tbi_chunks), path(stats_chunks)
+    // arity '1..*': always a list, so the -I / -stats builders below also work for a
+    // single-shard scatter (a lone Path would be iterated over its path components).
+    tuple val(meta), path(vcf_chunks, arity: '1..*'), path(tbi_chunks, arity: '1..*'), path(stats_chunks, arity: '1..*')
     path  ref_fasta
     path  ref_fai
     path  ref_dict
@@ -693,83 +558,9 @@ process MERGE_MUTECT2 {
 
 
 // ============================================================
-//  STAGE 5O: Variant-type-aware ensemble consensus (N-of-M callers)
+//  STAGE 5 variant_calling: ENSEMBLE_CONSENSUS - caller consensus (Mutect2-anchored or N-of-M)
 // ============================================================
 
-//     consensus() {
-//         local out="\$1"; shift
-//         local minreq="\$1"; shift
-//         local files=("\$@")
-//         local n=\${#files[@]}
-//         if [ "\$n" -eq 0 ]; then
-//             bcftools view -h ${mutect2_vcf} -O z -o "\$out"
-//             bcftools index -t "\$out"
-//             return
-//         fi
-//         local eff=\$minreq
-//         [ "\$n" -lt "\$minreq" ] && eff=\$n
-//         if [ "\$n" -eq 1 ]; then
-//             cp "\${files[0]}" "\$out"
-//         elif [ "\$eff" -le 1 ]; then
-//             bcftools concat -a -D "\${files[@]}" -O u | bcftools sort -O z -o "\$out" -
-//         else
-//             local d=isec_tmp_\$(basename "\$out" .vcf.gz)
-//             rm -rf "\$d"
-//             bcftools isec -n +\${eff} -c none -w1 -p "\$d" -O z "\${files[@]}"
-//             cp "\$d"/0000.vcf.gz "\$out"
-//         fi
-//         bcftools index -t "\$out"
-//     }
-
-//     snv_files=()
-//     indel_files=()
-
-//     if [ -s "${mutect2_vcf}" ]; then
-//         prep "${mutect2_vcf}" mutect2 pass
-//         snv_files+=(mutect2.snv.vcf.gz)
-//         indel_files+=(mutect2.indel.vcf.gz)
-//     fi
-//     if [ -s "${strelka_snv}" ]; then
-//         prep "${strelka_snv}" strelka_s pass
-//         snv_files+=(strelka_s.snv.vcf.gz)
-//     fi
-//     if [ -s "${strelka_indel}" ]; then
-//         prep "${strelka_indel}" strelka_i pass
-//         indel_files+=(strelka_i.indel.vcf.gz)
-//     fi
-//     if [ -s "${muse_vcf}" ]; then
-//         prep "${muse_vcf}" muse muse
-//         snv_files+=(muse.snv.vcf.gz)
-//     fi
-//     if [ -s "${varscan_snv}" ]; then
-//         prep "${varscan_snv}" varscan_s pass
-//         snv_files+=(varscan_s.snv.vcf.gz)
-//     fi
-//     if [ -s "${varscan_indel}" ]; then
-//         prep "${varscan_indel}" varscan_i pass
-//         indel_files+=(varscan_i.indel.vcf.gz)
-//     fi
-
-//     consensus consensus_snv.vcf.gz   ${min_snv}   \${snv_files[@]+"\${snv_files[@]}"}
-//     consensus consensus_indel.vcf.gz ${min_indel} \${indel_files[@]+"\${indel_files[@]}"}
-
-//     bcftools concat -a -D consensus_snv.vcf.gz consensus_indel.vcf.gz -O u \
-//       | bcftools sort -O z -o ${meta.sample_id}_consensus.vcf.gz -
-//     bcftools index -t ${meta.sample_id}_consensus.vcf.gz
-
-//     {   echo "CONSENSUS SUMMARY: ${meta.sample_id}"
-//         echo "min_snv_callers=${min_snv} min_indel_callers=${min_indel} muse_exclude=${muse_exclude}"
-//         echo "snv-capable callers present: \${#snv_files[@]}"
-//         echo "indel-capable callers present: \${#indel_files[@]}"
-//         echo "consensus SNVs:   \$(bcftools view -H consensus_snv.vcf.gz   | wc -l)"
-//         echo "consensus indels: \$(bcftools view -H consensus_indel.vcf.gz | wc -l)"
-//         echo "total consensus:  \$(bcftools view -H ${meta.sample_id}_consensus.vcf.gz | wc -l)"
-//     } > ${meta.sample_id}_consensus_stats.txt
-//     """
-// }
-
-
-// ============================================================
 process ENSEMBLE_CONSENSUS {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -798,128 +589,22 @@ process ENSEMBLE_CONSENSUS {
     def min_snv      = params.consensus_min_snv_callers   ?: 2
     def min_indel    = params.consensus_min_indel_callers ?: 2
     def muse_exclude = params.muse_exclude_tier           ?: 'Tier5'
-    def filter_mode  = params.consensus_filter_mode       ?: 'remove'   // 'remove' | 'tag'
+    def filter_mode  = params.consensus_filter_mode       ?: 'tag'      // 'tag' | 'remove'
+    def backbone     = params.consensus_backbone          ?: 'mutect2'  // 'mutect2' | 'union'
     """
-    set -euo pipefail
-
-    # Emit per-variant caller support (CHROM POS REF ALT CALLER) for one caller VCF.
-    # PASS/somatic-filtered and left-aligned+split so alleles match across callers.
-    emit_support() {
-        local invcf="\$1" caller="\$2" mode="\$3" sel
-        case "\$mode" in
-          muse)    sel=(bcftools view -e "FILTER==\\"${muse_exclude}\\"" -O u "\$invcf") ;;
-          varscan)
-              # capture the header first: 'grep -q' closing the pipe early under
-              # pipefail (large contig header) would make this test spuriously false.
-              vs_hdr=\$(bcftools view -h "\$invcf")
-              if grep -q 'ID=SS,' <<< "\$vs_hdr"; then
-                  sel=(bcftools view -i 'INFO/SS==2' -f PASS,. -O u "\$invcf")
-              else
-                  sel=(bcftools view -f PASS,. -O u "\$invcf")
-              fi ;;
-          *)       sel=(bcftools view -f PASS,. -O u "\$invcf") ;;
-        esac
-        "\${sel[@]}" | bcftools norm -m -any -f ${ref_fasta} -O u - \
-          | bcftools query -f "%CHROM\\t%POS\\t%REF\\t%ALT\\t\${caller}\\n"
-    }
-
-    : > support.raw
-    [ -s "${mutect2_vcf}" ]   && emit_support "${mutect2_vcf}"   mutect2  pass    >> support.raw
-    [ -s "${strelka_snv}" ]   && emit_support "${strelka_snv}"   strelka2 pass    >> support.raw
-    [ -s "${strelka_indel}" ] && emit_support "${strelka_indel}" strelka2 pass    >> support.raw
-    [ -s "${muse_vcf}" ]      && emit_support "${muse_vcf}"      muse     muse    >> support.raw
-    [ -s "${varscan_snv}" ]   && emit_support "${varscan_snv}"   varscan  varscan >> support.raw
-    [ -s "${varscan_indel}" ] && emit_support "${varscan_indel}" varscan  varscan >> support.raw
-
-    # aggregate - CHROM POS REF ALT CALLERS(csv) NCALLERS(distinct)
-    sort -k1,1 -k2,2n -k3,3 -k4,4 -k5,5 support.raw | awk -F'\\t' 'BEGIN{OFS="\\t"}
-      { k=\$1 FS \$2 FS \$3 FS \$4
-        if(k!=prev && prev!=""){ print pc,pp,pr,pa,cs,nc; cs="";nc=0 }
-        if(\$5!="" && index(","cs",", ","\$5",")==0){ cs=(cs==""?\$5:cs","\$5); nc++ }
-        prev=k;pc=\$1;pp=\$2;pr=\$3;pa=\$4 }
-      END{ if(prev!="") print pc,pp,pr,pa,cs,nc }' > agg.tsv
-
-    # Mutect2 MNPs (equal-length REF/ALT > 1 bp) are kept as ONE record (correct codon-level
-    # annotation). Other callers report the constituent SNVs, so an MNP's vote = callers that
-    # support EVERY constituent SNV (intersection) + mutect2. Deterministic caller order.
-    awk -F'\\t' 'BEGIN { OFS = "\\t"; no = split("mutect2,strelka2,muse,varscan", ord, ",") }
-      { k = \$1 FS \$2 FS \$3 FS \$4; cs[k] = \$5; row[NR] = \$0 }
-      END {
-        for (r = 1; r <= NR; r++) {
-          split(row[r], f, "\\t")
-          if (length(f[3]) > 1 && length(f[3]) == length(f[4]) && index("," f[5] ",", ",mutect2,") > 0) {
-            for (o in inter) delete inter[o]; first = 1
-            for (i = 1; i <= length(f[3]); i++) {
-              rb = substr(f[3], i, 1); ab = substr(f[4], i, 1); if (rb == ab) continue
-              for (o in cur) delete cur[o]
-              m = split(cs[f[1] FS (f[2] + i - 1) FS rb FS ab], c, ",")
-              for (j = 1; j <= m; j++) if (c[j] != "") cur[c[j]] = 1
-              if (first) { for (o in cur) inter[o] = 1; first = 0 }
-              else       { for (o in inter) if (!(o in cur)) delete inter[o] }
-            }
-            inter["mutect2"] = 1; out = ""; nc = 0
-            for (x = 1; x <= no; x++) if (ord[x] in inter) { out = (out == "" ? ord[x] : out "," ord[x]); nc++ }
-            print f[1], f[2], f[3], f[4], out, nc
-          } else print row[r]
-        }
-      }' agg.tsv > agg.mnp.tsv && mv agg.mnp.tsv agg.tsv
-    bgzip -f agg.tsv
-    tabix -f -s1 -b2 -e2 agg.tsv.gz
-
-    # distinct callers present (clamp thresholds so we never require more than exist)
-    n_callers=\$(cut -f5 support.raw | sort -u | grep -c . || true)
-    eff_snv=${min_snv};   [ "\$n_callers" -lt "\$eff_snv" ]   && eff_snv=\$n_callers
-    eff_indel=${min_indel}; [ "\$n_callers" -lt "\$eff_indel" ] && eff_indel=\$n_callers
-    [ "\$eff_snv"   -lt 1 ] && eff_snv=1
-    [ "\$eff_indel" -lt 1 ] && eff_indel=1
-
-    cat > cons_hdr.txt <<'HDR'
-##INFO=<ID=CALLERS,Number=.,Type=String,Description="Somatic callers supporting this variant">
-##INFO=<ID=NCALLERS,Number=1,Type=Integer,Description="Number of somatic callers supporting this variant">
-HDR
-
-    # Backbone = Mutect2 (carries _T/_N samples + FORMAT). Normalize the SAME way,
-    # keep PASS, annotate with the cross-caller vote, then keep records meeting the
-    # per-type N-of-M threshold. Output stays a Mutect2-genotyped VCF.
-    bcftools view -f PASS,. -O u ${mutect2_vcf} \
-      | bcftools norm -m -any -f ${ref_fasta} -O z -o m2.norm.vcf.gz -
-    bcftools index -f -t m2.norm.vcf.gz
-
-    bcftools annotate -a agg.tsv.gz -h cons_hdr.txt \
-        -c CHROM,POS,REF,ALT,INFO/CALLERS,INFO/NCALLERS \
-        m2.norm.vcf.gz -O z -o m2.annot.vcf.gz
-    bcftools index -f -t m2.annot.vcf.gz
-
-    # split by type, apply per-type threshold, recombine (all Mutect2 - concat-safe)
-    if [ "${filter_mode}" = "tag" ]; then
-        bcftools view -v snps,mnps -O u m2.annot.vcf.gz | bcftools filter -m + -s LOWCONSENSUS -e "INFO/NCALLERS < \$eff_snv"   -O z -o part.snv.vcf.gz
-        bcftools view -v indels -O u m2.annot.vcf.gz | bcftools filter -m + -s LOWCONSENSUS -e "INFO/NCALLERS < \$eff_indel" -O z -o part.indel.vcf.gz
-    else
-        bcftools view -v snps,mnps -i "INFO/NCALLERS >= \$eff_snv"   -O z -o part.snv.vcf.gz   m2.annot.vcf.gz
-        bcftools view -v indels -i "INFO/NCALLERS >= \$eff_indel" -O z -o part.indel.vcf.gz m2.annot.vcf.gz
-    fi
-    bcftools index -f -t part.snv.vcf.gz
-    bcftools index -f -t part.indel.vcf.gz
-
-    bcftools concat -a part.snv.vcf.gz part.indel.vcf.gz -O u \
-      | bcftools sort -O z -o ${meta.sample_id}_consensus.vcf.gz -
-    bcftools index -f -t ${meta.sample_id}_consensus.vcf.gz
-
-    {   echo "CONSENSUS SUMMARY: ${meta.sample_id}"
-        echo "mode: N-of-M vote over all callers; Mutect2-backbone records; provenance in INFO/CALLERS,NCALLERS; filter=${filter_mode}"
-        echo "callers_present=\$n_callers  eff_snv=\$eff_snv  eff_indel=\$eff_indel  muse_exclude=${muse_exclude}"
-        echo "mutect2 PASS input:   \$(bcftools view -H -f PASS,. ${mutect2_vcf} | wc -l)"
-        echo "consensus SNVs:       \$(bcftools view -H -v snps   ${meta.sample_id}_consensus.vcf.gz | wc -l)"
-        echo "consensus MNPs:       \$(bcftools view -H -v mnps   ${meta.sample_id}_consensus.vcf.gz | wc -l)"
-        echo "consensus indels:     \$(bcftools view -H -v indels ${meta.sample_id}_consensus.vcf.gz | wc -l)"
-        echo "total consensus:      \$(bcftools view -H ${meta.sample_id}_consensus.vcf.gz | wc -l)"
-    } > ${meta.sample_id}_consensus_stats.txt
+    ensemble_consensus.sh --sample ${meta.sample_id} --normal ${meta.normal_id} --fasta ${ref_fasta} \\
+        --mutect2 ${mutect2_vcf} \\
+        ${strelka_snv   ? "--strelka-snv ${strelka_snv}"     : ''} ${strelka_indel ? "--strelka-indel ${strelka_indel}" : ''} \\
+        ${muse_vcf      ? "--muse ${muse_vcf}"               : ''} \\
+        ${varscan_snv   ? "--varscan-snv ${varscan_snv}"     : ''} ${varscan_indel ? "--varscan-indel ${varscan_indel}" : ''} \\
+        --min-snv ${min_snv} --min-indel ${min_indel} --muse-exclude ${muse_exclude} \\
+        --filter-mode ${filter_mode} --backbone ${backbone}
     """
 }
 
 
 // ============================================================
-//  STAGE 5P: SOMATIC variant-level filtering (VAF / depth / tumor-in-normal)
+//  STAGE 5 variant_calling: FILTER_SOMATIC_VCF - somatic filters (VAF, depth, tumor-in-normal)
 //
 //  Soft-filters Mutect2/ensemble somatic SNV+indel calls on tumor VAF,
 //  alt-read support, total depth, and presence in the matched normal
@@ -929,6 +614,7 @@ HDR
 //  defaults). Mode 'tag' (default) keeps all variants and labels failures;
 //  mode 'remove' drops them.
 // ============================================================
+
 process FILTER_SOMATIC_VCF {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -947,68 +633,28 @@ process FILTER_SOMATIC_VCF {
     path  "${meta.sample_id}_filter_stats.txt",          emit: stats
 
     script:
-    def min_t_vaf = params.filter_min_tumor_vaf    ?: 0.05
-    def min_t_ad  = params.filter_min_tumor_alt_ad ?: 3
-    def min_t_dp  = params.filter_min_tumor_dp     ?: 20
+    def min_t_vaf = (params.filter_min_tumor_vaf    != null) ? params.filter_min_tumor_vaf    : 0.05   // 0 disables the test
+    def min_t_ad  = (params.filter_min_tumor_alt_ad != null) ? params.filter_min_tumor_alt_ad : 3
+    def min_t_dp  = (params.filter_min_tumor_dp     != null) ? params.filter_min_tumor_dp     : 20
     def max_n_vaf = (params.filter_max_normal_vaf != null) ? params.filter_max_normal_vaf : 0.01   // 0 is a valid strict setting
     // Normal evidence needs >= this many alt reads as well as VAF: 1 read in a 30x normal is 3.3% VAF
     // (sequencing noise), while 1 read in an 800x normal passes the VAF test anyway.
     def min_n_alt = (params.filter_min_normal_alt_fail != null) ? params.filter_min_normal_alt_fail : 2
     def mode      = params.somatic_filter_mode     ?: 'tag'
     """
-    set -euo pipefail
-
-    # Resolve tumor/normal sample COLUMN INDEX by name suffix (_T/_N). Mutect2
-    # may write the two samples in either order, so we key by NAME not position.
-    samples="\$(bcftools query -l ${vcf})"
-    tumor_idx=""; normal_idx=""; i=0
-    while IFS= read -r s; do
-        case "\$s" in
-            *_T) tumor_idx=\$i ;;
-            *_N) normal_idx=\$i ;;
-        esac
-        i=\$((i+1))
-    done <<EOF
-\$samples
-EOF
-
-    if [ -z "\$tumor_idx" ] || [ -z "\$normal_idx" ]; then
-        echo "ERROR: could not resolve tumor(_T)/normal(_N) sample columns in ${vcf}" >&2
-        echo "samples found: \$samples" >&2
-        exit 1
-    fi
-
-    # Fail-condition: tumor VAF/altAD/DP below thresholds OR alt present in normal.
-    # Scalar per-sample indexing (FMT/TAG[idx]) so '||' joins resolved values.
-    # null-guard every term in the expression but be aware of the residual risk this leaves
-    EXPR="(FMT/AF[\${tumor_idx}:0]!='.' && FMT/AF[\${tumor_idx}:0] < ${min_t_vaf}) || (FMT/AD[\${tumor_idx}:1]!='.' && FMT/AD[\${tumor_idx}:1] < ${min_t_ad}) || (FMT/DP[\${tumor_idx}]!='.' && FMT/DP[\${tumor_idx}] < ${min_t_dp}) || (FMT/AF[\${normal_idx}:0]!='.' && FMT/AF[\${normal_idx}:0] > ${max_n_vaf} && FMT/AD[\${normal_idx}:1]!='.' && FMT/AD[\${normal_idx}:1] >= ${min_n_alt})"
-    if [ "${mode}" = "remove" ]; then
-        bcftools view -e "\$EXPR" -O z -o ${meta.sample_id}_filtered.vcf.gz ${vcf}
-    else
-        bcftools filter -m + -s LOWSUPPORT -e "\$EXPR" -O z -o ${meta.sample_id}_filtered.vcf.gz ${vcf}
-    fi
-    bcftools index -t ${meta.sample_id}_filtered.vcf.gz
-
-    {   echo "FILTER SUMMARY: ${meta.sample_id}"
-        echo "mode: ${mode}"
-        echo "thresholds: tumor_vaf>=${min_t_vaf} tumor_alt_ad>=${min_t_ad} tumor_dp>=${min_t_dp} normal_vaf<=${max_n_vaf} (fail only with normal_alt_ad>=${min_n_alt})"
-        echo "tumor_col_idx: \$tumor_idx  normal_col_idx: \$normal_idx"
-        echo "input variants:       \$(bcftools view -H ${vcf} | wc -l)"
-        echo "output total records: \$(bcftools view -H ${meta.sample_id}_filtered.vcf.gz | wc -l)"
-        echo "output PASS records:  \$(bcftools view -H -f PASS ${meta.sample_id}_filtered.vcf.gz | wc -l)"
-    } > ${meta.sample_id}_filter_stats.txt
+    filter_somatic_vcf.sh --vcf ${vcf} --tumor ${meta.sample_id} --normal ${meta.normal_id} --mode ${mode} \\
+        --min-tumor-vaf ${min_t_vaf} --min-tumor-ad ${min_t_ad} --min-tumor-dp ${min_t_dp} \\
+        --max-normal-vaf ${max_n_vaf} --min-normal-alt ${min_n_alt}
     """
 }
 
 
 // ============================================================
-//  STAGE 5R-LOH: SEQUENZA - allele-specific CN + LOH + purity/ploidy
-//  (Replaces FACETS) - PARALLEL version
+//  STAGE 5 variant_calling: SEQUENZA - allele-specific copy number, purity and ploidy - Sequenza
 //
-//  --parallel runs chromosomes concurrently, writing ONE FILE PER CHROMOSOME
-//  named <output-prefix><chromosome>, then merges them before binning.
-//  VERIFY on first run that per-chrom files match the pattern in the merge
-//  loop (f="<prefix><chrom>"); adjust if the actual suffix differs.
+//  sequenza-utils bam2seqz --parallel writes one seqz file per chromosome
+//  (<prefix>_<chrom>.seqz.gz); they are merged in chromosome order before
+//  binning and fitting.
 // ============================================================
 
 process SEQUENZA {
@@ -1046,170 +692,30 @@ process SEQUENZA {
     def window   = params.sequenza_window   ?: 50
     def gamma    = params.sequenza_gamma    ?: 80
     def kmin     = params.sequenza_kmin     ?: 10
+    def seg_filt = (params.sequenza_segment_filter != null) ? params.sequenza_segment_filter : 3000000
     def assembly = params.sequenza_assembly ?: 'hg38'
-    // Map your 0 or 1 gender encoding to sequenzas female flag.
-    // ADJUST THIS LINE to your convention (see note below).
-    def female_flag = (meta.sex as String == '0') ? 'TRUE' : 'FALSE'
-    def chroms   = params.sequenza_chroms   ?: 'chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22 chrX chrY'
+    // Samplesheet sex (0 = female, 1 = male); NA is inferred from the normal's chrX depth in
+    // bin/sequenza.sh. Sequenza leaves chrX/chrY out of the purity/ploidy fit for males.
+    def female_flag = (meta.sex?.toString() == '0') ? 'TRUE' : (meta.sex?.toString() == '1') ? 'FALSE' : 'NA'
+    def sex_fmin    = params.sex_female_min_xratio ?: 0.80
+    def sex_mmax    = params.sex_male_max_xratio   ?: 0.65
+    // Primary chromosomes as named in the reference (chr1 or 1 style); a fixed chr-prefixed
+    // list matched nothing on references named 1..22,X,Y.
+    def chroms_param = params.sequenza_chroms ?: ''
     // Cap parallel bam2seqz workers (each holds deep-coverage pileup in memory).
     def slots    = Math.min((task.cpus ?: 4) as Integer, (params.sequenza_parallel ?: 4) as Integer)
     """
-    set -euo pipefail
-
-    trap '
-        rm -f ${meta.sample_id}.seqz.gz*
-        rm -f ${meta.sample_id}_*.seqz.gz
-        rm -f ${meta.sample_id}.merged.seqz.gz
-        rm -f ${meta.sample_id}.binned.seqz.gz
-        rm -f run_sequenza.R
-        rm -f ${meta.sample_id}_CN_bars.pdf
-        rm -f ${meta.sample_id}_chromosome_depths.pdf
-        rm -f ${meta.sample_id}_gc_plots.pdf
-        rm -f ${meta.sample_id}_model_fit.pdf
-        rm -f ${meta.sample_id}_alternative_fit.pdf
-    ' EXIT
-
-    # Step 1: BAMs + GC wiggle - raw seqz, parallelized per chromosome.
-    # --parallel writes one file per chromosome named <prefix>_<chrom>.seqz.gz
-    # -C restricts to chr1-22,X,Y (skips d1.vd1 decoy/viral/HLA contigs).
-    sequenza-utils bam2seqz \\
-        --normal   ${normal_bam} \\
-        --tumor    ${tumour_bam} \\
-        --fasta    ${ref_fasta} \\
-        -gc        ${sequenza_gc_wiggle} \\
-        -C         ${chroms} \\
-        --parallel ${slots} \\
-        --output   ${meta.sample_id}.seqz.gz \\
-        -q 20 -N 30
-
-    # Step 1b: merge per-chromosome seqz in chromosome order, one header.
-    first=1
-    for chr in ${chroms}; do
-        f="${meta.sample_id}_\${chr}.seqz.gz"
-        if [ ! -s "\$f" ]; then
-            echo "WARN: no seqz for \${chr} (\$f) - skipping" >&2
-            continue
-        fi
-        if [ "\$first" = "1" ]; then
-            zcat "\$f"
-            first=0
-        else
-            zcat "\$f" | awk 'NR > 1 || \$1 != "chromosome"'
-        fi
-    done | bgzip > ${meta.sample_id}.merged.seqz.gz
-
-    # Fail loudly if the merge is empty (prevents ZeroDivisionError in binning)
-    if [ \$(zcat ${meta.sample_id}.merged.seqz.gz 2>/dev/null | head -2 | wc -l) -lt 2 ]; then
-        echo "ERROR: merged seqz empty - no per-chromosome files matched ${meta.sample_id}_<chr>.seqz.gz" >&2
-        ls -la ${meta.sample_id}*.seqz.gz >&2 || true
-        exit 1
-    fi
-
-    # Step 2: bin merged seqz to reduce memory for R analysis
-    sequenza-utils seqz_binning \\
-        --seqz   ${meta.sample_id}.merged.seqz.gz \\
-        --window ${window} \\
-        -o       ${meta.sample_id}.binned.seqz.gz
-
-
-    # Step 3: Sequenza R analysis
-    cat > run_sequenza.R <<'RSCRIPT'
-    suppressMessages(library(sequenza))
-    suppressMessages(library(iotools))
-
-    # sequenza 3.0.0 calls chunk.apply(parallel=) in four internal functions;
-    # iotools >=0.3 renamed that argument to CH.PARALLEL. Patch all four in
-    # sequenza's own namespace. Verified: complete set, all patch cleanly.
-    # No-op if iotools is old (still has 'parallel').
-    if ("CH.PARALLEL" %in% names(formals(iotools::chunk.apply))) {
-        .targets <- c("gc.sample.stats", "read.seqz", "read.seqz.chr", "sequenza.extract")
-        for (.t in .targets) {
-            .orig <- get(.t, envir = asNamespace("sequenza"))
-            .src  <- deparse(.orig)
-            .src  <- gsub("parallel = parallel", "CH.PARALLEL = parallel", .src, fixed = TRUE)
-            .fn   <- eval(parse(text = .src))
-            environment(.fn) <- asNamespace("sequenza")
-            assignInNamespace(.t, .fn, ns = "sequenza")
-        }
-        cat("Patched", length(.targets), "sequenza functions to use CH.PARALLEL.\\n")
-    }
-
-    args      <- commandArgs(trailingOnly = TRUE)
-    seqz_file <- args[1]
-    prefix    <- args[2]
-    assembly  <- args[3]
-    gamma     <- as.integer(args[4])
-    kmin      <- as.integer(args[5])
-
-    set.seed(1234)
-
-    seqz_data <- sequenza.extract(
-        seqz_file,
-        assembly = assembly,
-        gamma    = gamma,
-        kmin     = kmin,
-        verbose  = TRUE
-    )
-
-    # sequenza.extract wraps copynumber segmentation in try(): an unsupported
-    # assembly silently yields ONE segment per chromosome. Stop instead.
-    nseg <- sapply(seqz_data\$segments, nrow)
-    print(nseg)
-    if (all(nseg <= 1))
-        stop("Sequenza produced one segment per chromosome: segmentation failed ",
-             "(the copynumber package must support assembly '", assembly, "')")
-
-    # Sex-chromosome names as they appear in the data (chrX/chrY or X/Y): Sequenza's
-    # default XY = c("X","Y") does not match chrX/chrY, so chrY was fitted in female
-    # samples and a male chrX was treated as diploid.
-    xy_pfx <- if (any(grepl("^chr", seqz_data\$chromosomes))) "chr" else ""
-    XY     <- c(X = paste0(xy_pfx, "X"), Y = paste0(xy_pfx, "Y"))
-    cat("Sex chromosomes:", XY, "\\n")
-
-    CP <- sequenza.fit(
-        seqz_data,
-        cellularity = seq(0.1, 1, 0.01),
-        ploidy      = seq(1, 7, 0.1),
-        female      = ${female_flag},
-        XY          = XY
-    )
-
-    sequenza.results(
-        sequenza.extract = seqz_data,
-        cp.table         = CP,
-        sample.id        = prefix,
-        out.dir          = ".",
-        female           = ${female_flag},
-        XY               = XY
-    )
-    RSCRIPT
-
-    Rscript --vanilla run_sequenza.R \\
-        ${meta.sample_id}.binned.seqz.gz \\
-        ${meta.sample_id} \\
-        ${assembly} \\
-        ${gamma} \\
-        ${kmin}
-    # Fit ambiguity QC: top-2 purity/ploidy solutions by SLPP. Reported, not judged -
-    # review cases where the two solutions are close (common in hypodiploid/low-purity).
-    awk -F'\\t' 'NR == 1 { for (i = 1; i <= NF; i++) h[\$i] = i
-                           if (!("cellularity" in h) || !("ploidy" in h) || !("SLPP" in h)) exit
-                           next }
-                 { print \$(h["cellularity"]) "\\t" \$(h["ploidy"]) "\\t" \$(h["SLPP"]) }' \\
-        ${meta.sample_id}_alternative_solutions.txt \\
-        | sort -t "\$(printf '\\t')" -k3,3gr | head -n 2 > fit_top2.tmp || true
-    {   printf 'rank\\tcellularity\\tploidy\\tSLPP\\n'
-        awk -F'\\t' '{ print NR "\\t" \$0 }' fit_top2.tmp
-        awk -F'\\t' 'NR == 1 { c1 = \$1; p1 = \$2; l1 = \$3 } NR == 2 { c2 = \$1; p2 = \$2; l2 = \$3 }
-                     END { if (NR >= 2) printf "delta_1_minus_2\\t%.3f\\t%.2f\\t%.3f\\n", c1 - c2, p1 - p2, l1 - l2
-                           else print "delta_1_minus_2\\tNA\\tNA\\tNA" }' fit_top2.tmp
-    } > ${meta.sample_id}_fit_qc.tsv
-    rm -f fit_top2.tmp
+    sequenza.sh --sample ${meta.sample_id} --tumor ${tumour_bam} --normal ${normal_bam} \\
+        --fasta ${ref_fasta} --fai ${ref_fai} --gc-wiggle ${sequenza_gc_wiggle} --parallel ${slots} \\
+        --window ${window} --gamma ${gamma} --kmin ${kmin} --female ${female_flag} \\
+        --female-min-xratio ${sex_fmin} --male-max-xratio ${sex_mmax} \\
+        --segment-filter ${seg_filt} --assembly ${assembly} ${chroms_param ? "--chroms \"${chroms_param}\"" : ''}
     """
 }
 
+
 // ============================================================
-//  STAGE 5R_A-LOH: SEQUENZA - gene level CN + LOH + purity/ploidy
+//  STAGE 5 variant_calling: SEQUENZA_GENE_LOH - gene- and arm-level copy number and LOH
 // ============================================================
 
 process SEQUENZA_GENE_LOH {
@@ -1232,101 +738,17 @@ process SEQUENZA_GENE_LOH {
     def arm_min = (params.arm_call_min_frac != null) ? params.arm_call_min_frac : 0.5
     """
     set -euo pipefail
-    cat > gene_loh.R <<'GENELOH'
-    args <- commandArgs(trailingOnly = TRUE)
-    seg <- read.delim(args[1], sep="\\t", header=TRUE, stringsAsFactors=FALSE)
-    req <- c("chromosome","start.pos","end.pos","CNt","A","B")
-    if (!all(req %in% colnames(seg))) stop(sprintf("segments missing: %s", paste(setdiff(req,colnames(seg)),collapse=",")), call.=FALSE)
-    bed <- read.delim(args[2], sep="\\t", header=FALSE, stringsAsFactors=FALSE)
-    if (ncol(bed) < 5) stop("gene BED needs 5 cols: chr,start,end,symbol,ENSG", call.=FALSE)
-    bed <- bed[,1:5]; colnames(bed) <- c("chr","start","end","gene","gene_id")
-    nc <- function(x){ x <- sub("^chr","",as.character(x)); x[x %in% c("M","MT")] <- "MT"; x }
-    seg\$chromosome <- nc(seg\$chromosome); bed\$chr <- nc(bed\$chr)
-    bed\$start <- bed\$start + 1L
-    for (cc in c("CNt","A","B","start.pos","end.pos")) seg[[cc]] <- suppressWarnings(as.numeric(seg[[cc]]))
-
-    # Tumour ploidy = length-weighted mean autosomal CNt; expected CN baseline = round(ploidy).
-    auto_re <- "^([1-9]|1[0-9]|2[0-2])\$"
-    seglen  <- seg\$end.pos - seg\$start.pos + 1
-    ok      <- grepl(auto_re, seg\$chromosome) & !is.na(seg\$CNt)
-    ploidy  <- if (any(ok)) sum(seglen[ok] * seg\$CNt[ok]) / sum(seglen[ok]) else NA_real_
-    base    <- if (is.na(ploidy)) 2 else floor(ploidy + 0.5)
-
-    clf <- function(cn,b){ if(is.na(cn)&&is.na(b))return("NO_COVERAGE"); if(is.na(b))return("UNKNOWN"); if(!is.na(cn)&&cn==0)return("HOMDEL"); if(b==0)return("LOH"); "HET" }
-    sbc <- split(seq_len(nrow(seg)), seg\$chromosome)
-    rc <- rep(NA_real_, nrow(bed)); ra <- rc; rb <- rc
-    for (i in seq_len(nrow(bed))) {
-      idx <- sbc[[ bed\$chr[i] ]]; if (is.null(idx)) next
-      ov <- pmin(bed\$end[i], seg\$end.pos[idx]) - pmax(bed\$start[i], seg\$start.pos[idx]) + 1
-      hit <- ov > 0; if (!any(hit)) next
-      j <- idx[hit][ which.max(ov[hit]) ]; rc[i] <- seg\$CNt[j]; ra[i] <- seg\$A[j]; rb[i] <- seg\$B[j]
-    }
-    out <- data.frame(Gene_ID=bed\$gene_id, Hugo_Symbol=bed\$gene, Chromosome=bed\$chr, Start=bed\$start, End=bed\$end,
-                      Total_CN=rc, Major_Allele=ra, Minor_Allele=rb, stringsAsFactors=FALSE)
-    out\$LOH_Status <- mapply(clf, out\$Total_CN, out\$Minor_Allele)
-    # CN-neutral relative to tumour ploidy (not CN==2): a tetraploid A=4,B=0 is CN-neutral LOH.
-    out\$LOH_Detail <- ifelse(out\$LOH_Status != "LOH", out\$LOH_Status,
-                       ifelse(out\$Total_CN == base, "CN_neutral_LOH",
-                       ifelse(out\$Total_CN <  base, "LOH_with_loss", "LOH_with_gain")))
-    # Males: chrX/chrY are single-copy by nature - B==0 there is expected, not LOH.
-    if (identical(args[10], "1")) {
-      hemi <- out\$Chromosome %in% c("X", "Y") & out\$LOH_Status == "LOH"
-      out\$LOH_Status[hemi] <- "HEMIZYGOUS"
-      out\$LOH_Detail[hemi] <- "HEMIZYGOUS_EXPECTED"
-    }
-    write.table(out, args[3], sep="\\t", quote=FALSE, row.names=FALSE)
-
-    # Genome-level summary: ploidy, fraction genome altered (CNt != baseline), LOH fraction (autosomes).
-    L    <- sum(seglen[ok])
-    fga  <- if (L > 0) sum(seglen[ok & seg\$CNt != base]) / L else NA_real_
-    okb  <- ok & !is.na(seg\$B)
-    floh <- if (sum(seglen[okb]) > 0) sum(seglen[okb & seg\$B == 0]) / sum(seglen[okb]) else NA_real_
-    # Sequenza's own fit (confints_CP.txt, Sequenza 3.x: row 2 = point estimate).
-    cp <- tryCatch(read.delim(args[9], sep="\\t", header=TRUE), error=function(e) NULL)
-    s_cell <- if (!is.null(cp) && nrow(cp) >= 2 && "cellularity" %in% colnames(cp)) cp\$cellularity[2] else NA
-    s_ploi <- if (!is.null(cp) && nrow(cp) >= 2 && "ploidy.estimate" %in% colnames(cp)) cp\$ploidy.estimate[2] else NA
-    summ <- data.frame(metric = c("sample_id","tumour_ploidy_weighted","cn_baseline","autosomal_bp_assessed",
-                                  "fraction_genome_altered","fraction_genome_loh",
-                                  "sequenza_cellularity","sequenza_ploidy_estimate"),
-                       value  = c(args[4], round(ploidy, 3), base, format(L, scientific=FALSE), round(fga, 4), round(floh, 4),
-                                  s_cell, s_ploi))
-    write.table(summ, args[5], sep="\\t", quote=FALSE, row.names=FALSE)
-
-    # Arm-level calls: fraction of each autosomal arm lost / gained vs baseline, and LOH fraction.
-    if (length(args) >= 6 && nzchar(args[6])) {
-      minf <- as.numeric(args[7])
-      arm  <- read.delim(args[6], sep="\\t", header=FALSE, stringsAsFactors=FALSE, comment.char="#")
-      if (ncol(arm) < 4) stop("arm BED needs 4 cols: chr,start,end,arm", call.=FALSE)
-      arm <- arm[,1:4]; colnames(arm) <- c("chr","start","end","arm")
-      arm\$chr <- nc(arm\$chr); arm\$start <- arm\$start + 1L
-      rows <- list()
-      for (i in seq_len(nrow(arm))) {
-        if (!grepl(auto_re, arm\$chr[i])) next
-        idx <- sbc[[ arm\$chr[i] ]]; if (is.null(idx)) next
-        ov <- pmin(arm\$end[i], seg\$end.pos[idx]) - pmax(arm\$start[i], seg\$start.pos[idx]) + 1
-        h  <- ov > 0 & !is.na(seg\$CNt[idx]); if (!any(h)) next
-        o  <- ov[h]; cn <- seg\$CNt[idx][h]; b <- seg\$B[idx][h]; cov <- sum(o)
-        lf <- sum(o[cn < base]) / cov; gf <- sum(o[cn > base]) / cov; hf <- sum(o[!is.na(b) & b == 0]) / cov
-        call <- if (lf >= minf) "LOSS" else if (gf >= minf) "GAIN" else "NEUTRAL"
-        rows[[length(rows) + 1]] <- data.frame(arm=arm\$arm[i], chromosome=arm\$chr[i], covered_bp=format(cov, scientific=FALSE),
-                                               loss_frac=round(lf,4), gain_frac=round(gf,4), loh_frac=round(hf,4), call=call)
-      }
-      tab <- if (length(rows)) do.call(rbind, rows) else
-             data.frame(arm=character(), chromosome=character(), covered_bp=numeric(), loss_frac=numeric(),
-                        gain_frac=numeric(), loh_frac=numeric(), call=character())
-      write.table(tab, args[8], sep="\\t", quote=FALSE, row.names=FALSE)
-    }
-    GENELOH
-    Rscript --vanilla gene_loh.R ${segments} ${gene_bed} ${meta.sample_id}_gene_loh.tsv \\
+    Rscript --vanilla "\$(command -v gene_loh.R)" ${segments} ${gene_bed} ${meta.sample_id}_gene_loh.tsv \\
         ${meta.sample_id} ${meta.sample_id}_cn_summary.tsv \\
         "${arm_bed}" ${arm_min} ${meta.sample_id}_arm_cn.tsv ${confints} "${meta.sex ?: 'NA'}"
-    rm -f gene_loh.R
     """
 }
 
+
 // ============================================================
-//  STAGE 7: CONSOLIDATE_PATIENT_REPORT 
+//  STAGE 7 classification: CONSOLIDATE_PATIENT_REPORT - consolidated somatic report per tumor
 // ============================================================
+
 process CONSOLIDATE_PATIENT_REPORT {
     tag { patient_id }
     label 'process_low'
@@ -1335,6 +757,8 @@ process CONSOLIDATE_PATIENT_REPORT {
     publishDir { "${pubDir('classification', true)}/reports" }, mode: 'copy'
 
     input:
+    // patient_id = report name: the patient for a single tumour, the tumour sample_id when a
+    // patient has several (samplesheet 'sample' column) so reports never overwrite each other.
     tuple val(patient_id), val(sample_id), val(sex),
         path(classification, stageAs: 'class.tsv'),
         path(cnvkit_cns,     stageAs: 'cnv.cns'),
@@ -1352,101 +776,7 @@ process CONSOLIDATE_PATIENT_REPORT {
     def amp_min = (params.cn_amp_min_cn != null) ? params.cn_amp_min_cn : ''
     def sex_lab = (sex?.toString() == '0') ? 'female' : (sex?.toString() == '1') ? 'male' : 'unknown'
     """
-    set -uo pipefail
-    REPORT=${patient_id}_consolidated.tsv
-
-    {
-      echo "## ============================================================"
-      echo "## CONSOLIDATED VARIANT REPORT - PATIENT: ${patient_id}   (tumor sample: ${sample_id})"
-      echo "## Generated: \$(date '+%Y-%m-%d %H:%M:%S')"
-      echo "## NOTE: computational summary for review; not a final clinical tier."
-      echo "## ============================================================"
-    } > \$REPORT
-
-    printf '\\n## [1] SOMATIC SNV/INDEL  (07_classification; PASS calls only)\\n' >> \$REPORT
-    if [ -s class.tsv ]; then grep -v '^#' class.tsv >> \$REPORT; else echo "(no classification output)" >> \$REPORT; fi
-
-    # CN calls relative to the EXPECTED copy number: autosomes = tumour ploidy baseline,
-    # chrX/chrY sex-aware (male X/Y = baseline/2; female Y skipped; unknown sex -> X/Y skipped).
-    # Source: Sequenza (purity/ploidy-fitted) when present, else CNVkit (NOT purity-adjusted).
-    cat > cn_calls.awk <<'AWK'
-BEGIN { FS = OFS = "\\t" }
-function isauto(c) { return c ~ /^(chr)?([1-9]|1[0-9]|2[0-2])\$/ }
-function isx(c)    { return c ~ /^(chr)?X\$/ }
-function isy(c)    { return c ~ /^(chr)?Y\$/ }
-# pass 1 (sequenza only): tumour ploidy = length-weighted mean autosomal CNt
-NR == FNR && src == "sequenza" {
-    if (FNR == 1) { for (i = 1; i <= NF; i++) h[\$i] = i; next }
-    cn = \$(h["CNt"]); if (cn == "" || cn == "NA") next
-    if (isauto(\$(h["chromosome"]))) { L = \$(h["end.pos"]) - \$(h["start.pos"]) + 1; sw += L * cn; sl += L }
-    next
-}
-FNR == 1 {
-    for (i = 1; i <= NF; i++) h[\$i] = i
-    if (src == "sequenza") { ploidy = (sl > 0) ? sw / sl : 2; base = int(ploidy + 0.5)
-                             cc = "chromosome"; sc = "start.pos"; ec = "end.pos"; nc = "CNt"
-                             note = sprintf("tumour_ploidy=%.2f (length-weighted mean autosomal CNt)", ploidy) }
-    else                   { base = 2; cc = "chromosome"; sc = "start"; ec = "end"; nc = "cn"
-                             note = "NOT purity/ploidy-adjusted" }
-    printf "## cn_source=%s  %s  autosomal_baseline=%d  sex=%s  amp_min_cn=%s\\n", src, note, base, sexlab, (ampmin == "" ? "unset" : ampmin)
-    print "CHROM", "START", "END", "GENE", "LOG2", "COPY_NUMBER", "CALL"
-    next
-}
-{
-    c = \$(h[cc]); cn = \$(h[nc]); if (cn == "" || cn == "NA") next; cn += 0
-    if (isauto(c))    ex = base
-    else if (isx(c)) { if (sex == "1") ex = base / 2; else if (sex == "0") ex = base; else next }
-    else if (isy(c)) { if (sex == "1") ex = base / 2; else next }
-    else next
-    if (cn == 0)                              call = "HOMDEL"
-    else if (ampmin != "" && cn >= ampmin + 0) call = "AMP"
-    else if (cn > ex)                         call = "GAIN"
-    else if (cn < ex)                         call = "LOSS"
-    else next
-    if (src == "sequenza") { dr = \$(h["depth.ratio"]); lg = (dr + 0 > 0) ? sprintf("%.3f", log(dr) / log(2)) : "."; g = "." }
-    else                   { lg = \$(h["log2"]); g = \$(h["gene"]) }
-    print c, \$(h[sc]), \$(h[ec]), g, lg, cn, call
-}
-AWK
-    if [ -s seq_segments.txt ]; then
-      printf '\\n## [2] COPY NUMBER  (Sequenza segments; purity/ploidy-fitted; calls vs sex-aware expected CN)\\n' >> \$REPORT
-      awk -v src=sequenza -v sex="${sex}" -v sexlab="${sex_lab}" -v ampmin="${amp_min}" -f cn_calls.awk seq_segments.txt seq_segments.txt >> \$REPORT
-    elif [ -s cnv.cns ]; then
-      printf '\\n## [2] COPY NUMBER  (CNVkit call.cns; NOT purity-adjusted; calls vs sex-aware expected CN)\\n' >> \$REPORT
-      awk -v src=cnvkit -v sex="${sex}" -v sexlab="${sex_lab}" -v ampmin="${amp_min}" -f cn_calls.awk cnv.cns >> \$REPORT
-    else
-      printf '\\n## [2] COPY NUMBER\\n(no Sequenza or CNVkit output)\\n' >> \$REPORT
-    fi
-
-    printf '\\n## [3] LOH  (Sequenza; minor allele B==0)\\n' >> \$REPORT
-    if [ -s seq_segments.txt ]; then
-      awk -F'\\t' 'BEGIN{OFS="\\t"; print "CHROM","START","END","CNt","A","B","STATUS"}
-        NR==1{ for(i=1;i<=NF;i++) h[\$i]=i; next }
-        { b=\$(h["B"]); if(b=="")next;
-          if(b+0==0 && \$(h["CNt"])!="") print \$(h["chromosome"]),\$(h["start.pos"]),\$(h["end.pos"]),\$(h["CNt"]),\$(h["A"]),b,"LOH" }' seq_segments.txt >> \$REPORT
-    else echo "(no Sequenza output)" >> \$REPORT; fi
-
-    printf '\\n## [4] STRUCTURAL VARIANTS  (Manta + AnnotSV; one row/SV, PASS. ACMG = germline framework, advisory)\\n' >> \$REPORT
-    if [ -s sv_annot.tsv ] && [ \$(grep -vc '^AnnotSV_ID' sv_annot.tsv) -gt 0 ]; then
-      awk -F'\\t' 'NR==1{for(i=1;i<=NF;i++)h[\$i]=i;print"CHROM","START","END","SVTYPE","GENE(S)","ACMG";next}
-        (("Annotation_mode" in h)?\$(h["Annotation_mode"]):"full")!="full"{next}
-        (("FILTER" in h)&&\$(h["FILTER"])!="PASS"&&\$(h["FILTER"])!="."){next}
-        {g=(("Gene_name" in h)?\$(h["Gene_name"]):".");g=(g==""?".":g)
-         a=(("ACMG_class" in h)?\$(h["ACMG_class"]):".");a=(a==""||a=="NA"?".":a)
-         print \$(h["SV_chrom"]),\$(h["SV_start"]),\$(h["SV_end"]),\$(h["SV_type"]),g,a}' OFS='\\t' sv_annot.tsv >> \$REPORT
-    else echo "(no annotated SV output)" >> \$REPORT; fi
-
-    printf '\\n## [5] MSI  (MSIsensor-pro)\\n' >> \$REPORT
-    if [ -s msi_summary ]; then cat msi_summary >> \$REPORT; else echo "(no MSI output)" >> \$REPORT; fi
-
-    printf '\\n## [6] TMB\\n' >> \$REPORT
-    if [ -s tmb.txt ]; then cat tmb.txt >> \$REPORT; else echo "(no TMB output)" >> \$REPORT; fi
-
-    printf '\\n## [7] TUMOUR CROSS-SAMPLE CONTAMINATION  (GATK CalculateContamination; threshold %s)\\n' "${params.qc_max_contamination ?: 0.03}" >> \$REPORT
-    if [ -s contamination.table ]; then
-        awk -F'\\t' -v max="${params.qc_max_contamination ?: 0.03}" 'NR == 1 { next }
-            { printf "sample\\t%s\\ncontamination\\t%s\\nerror\\t%s\\nstatus\\t%s\\n", \$1, \$2, \$3, (\$2 + 0 > max + 0 ? "WARN" : "PASS") }' \\
-            contamination.table >> \$REPORT
-    else echo "(no contamination estimate - pileup_variants not set)" >> \$REPORT; fi
+    patient_report.sh --patient ${patient_id} --sample ${sample_id} --sex "${sex}" --sex-label ${sex_lab} \\
+        --max-contam ${params.qc_max_contamination ?: 0.03} ${amp_min != '' ? "--amp-min ${amp_min}" : ''}
     """
 }

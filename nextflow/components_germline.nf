@@ -5,13 +5,14 @@ nextflow.enable.dsl = 2
 include { gatkJavaOpts; pubDir } from './utils'
 
 // ============================================================
-//  components_germline.nf  -  All Germline Process Definitions
+//  components_germline.nf  -  Germline process definitions
 // ============================================================
 
 
 // ============================================================
-//  STAGE 5A: GERMLINE SNP/INDEL - HaplotypeCaller (GVCF mode)
+//  STAGE 5 variant_calling: HAPLOTYPECALLER - germline SNVs/indels - HaplotypeCaller GVCF (per shard)
 // ============================================================
+
 process HAPLOTYPECALLER {
     tag { "${meta.sample_id}:${interval_name}" }
     label 'process_variant'
@@ -46,10 +47,10 @@ process HAPLOTYPECALLER {
 }
 
 
+// ============================================================
+//  STAGE 5 variant_calling: MERGE_GVCFS - per-shard GVCFs merged into one per sample
+// ============================================================
 
-// ============================================================
-//  STAGE 5A-GATHER: Merge per-interval GVCFs - one per sample
-// ============================================================
 process MERGE_GVCFS {
     tag { "${meta.sample_id}" }
     label 'process_medium'
@@ -57,7 +58,7 @@ process MERGE_GVCFS {
     publishDir { "${pubDir('variant_calling', true)}/gvcf" }, mode: 'copy'
 
     input:
-    tuple val(meta), path(gvcf_chunks), path(tbi_chunks)
+    tuple val(meta), path(gvcf_chunks, arity: '1..*'), path(tbi_chunks, arity: '1..*')   // list even for one shard
     path  ref_fasta
     path  ref_fai
     path  ref_dict
@@ -80,9 +81,9 @@ process MERGE_GVCFS {
 
 
 // ============================================================
-//  STAGE 5A-GENOTYPE: GenotypeGVCFs  (NEW)
+//  STAGE 5 variant_calling: GENOTYPE_GVCFS - GenotypeGVCFs (single sample)
 //
-//  Converts per-sample GVCF - genotyped VCF.
+//  Converts per-sample GVCF -> genotyped VCF.
 //  Run per-sample for single-sample genotyping.
 //  For joint cohort genotyping, run on a merged GenomicsDB
 //  (not implemented here - add GenomicsDBImport for large cohorts).
@@ -90,11 +91,15 @@ process MERGE_GVCFS {
 //  This step is REQUIRED before CNN scoring or VQSR.
 //  Raw GVCF output is not valid variant calls.
 // ============================================================
+
 process GENOTYPE_GVCFS {
     tag { "${meta.sample_id}" }
     label 'process_variant'
 
     maxRetries    2
+
+    // Final callset only with germline_filter='none'; otherwise an intermediate of the NV filter.
+    publishDir { "${pubDir('variant_calling', true)}/snv" }, mode: 'copy', enabled: params.germline_filter == 'none'
 
     input:
     tuple val(meta), path(gvcf), path(gvcf_tbi)
@@ -135,7 +140,7 @@ process GENOTYPE_GVCFS {
 
 
 // ============================================================
-//  STAGE 5A-FILTER: NVScoreVariants  (single-sample DL filter)
+//  STAGE 5 variant_calling: NV_SCORE_VARIANTS - NVScoreVariants (germline_filter nv)
 //
 //  Single-sample germline variant filtering (params.germline_filter=='nv').
 //  Replaces VQSR for single samples or small cohorts (<30).
@@ -148,6 +153,7 @@ process GENOTYPE_GVCFS {
 //  Use the joint cohort path (params.germline_filter=='vqsr') for large
 //  cohorts (see JOINT COHORT GENOTYPING section below).
 // ============================================================
+
 process NV_SCORE_VARIANTS {
     tag { "${meta.sample_id}" }
     label 'process_variant'
@@ -196,16 +202,15 @@ process NV_SCORE_VARIANTS {
 }
 
 
-
-
 // ============================================================
-//  STAGE 5A-FILTER-2: FilterVariantTranches  (NEW)
+//  STAGE 5 variant_calling: FILTER_VARIANT_TRANCHES - FilterVariantTranches (germline_filter nv)
 //
 //  Applies CNN score tranches to produce final PASS/FAIL flags.
 //  Requires truth/training resources: HapMap, Omni, 1000G, Mills.
 //  SNP sensitivity: 99.95%  (tune per lab needs)
 //  INDEL sensitivity: 99.4% (tune per lab needs)
 // ============================================================
+
 process FILTER_VARIANT_TRANCHES {
     tag { "${meta.sample_id}" }
     label 'process_medium'
@@ -255,8 +260,9 @@ process FILTER_VARIANT_TRANCHES {
 
 
 // ============================================================
-//  STAGE 5A-ALT: GERMLINE SNP/INDEL - DeepVariant
+//  STAGE 5 variant_calling: DEEPVARIANT - germline SNVs/indels - DeepVariant
 // ============================================================
+
 process DEEPVARIANT {
     tag { "${meta.sample_id}" }
     label 'process_high_memory'
@@ -283,23 +289,14 @@ process DEEPVARIANT {
     def pad          = (params.wes_interval_padding != null) ? params.wes_interval_padding : 100
     def use_regions  = (meta.assay == 'wes' && interval_bed)
     def regions_flag = use_regions ? "--regions regions.padded.bed" : ''
-    def make_regions = !use_regions ? '' : """
-    if echo "${interval_bed}" | grep -q '[.]gz\$'; then CAT=zcat; else CAT=cat; fi
-    \$CAT ${interval_bed} \\
-        | awk -F'\\t' -v p=${pad} 'BEGIN { OFS = "\\t"; while ((getline l < "${ref_fai}") > 0) { split(l, a, "\\t"); len[a[1]] = a[2] } }
-            /^(#|track|browser)/ { next }
-            (\$1 in len) { s = \$2 - p; if (s < 0) s = 0; e = \$3 + p; if (e > len[\$1]) e = len[\$1]; print \$1, s, e }' \\
-        | LC_ALL=C sort -k1,1 -k2,2n \\
-        | awk -F'\\t' 'BEGIN { OFS = "\\t" }
-            { if (\$1 == c && \$2 <= e) { if (\$3 > e) e = \$3 } else { if (c != "") print c, s, e; c = \$1; s = \$2; e = \$3 } }
-            END { if (c != "") print c, s, e }' > regions.padded.bed
-    [ -s regions.padded.bed ] || { echo "ERROR: padded regions BED is empty (contig names of BED vs FASTA?)" >&2; exit 1; }
-    """
+    def make_regions = use_regions ? "pad_merge_bed.sh ${interval_bed} ${ref_fai} ${pad} regions.padded.bed" : ''
     def model_type   = (meta.assay == 'wes') ? 'WES' : 'WGS'
-
     """
     set -euo pipefail
     ${make_regions}
+    # unique, auto-cleaned scratch for the make_examples / call_variants intermediates
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_dv_tmp.XXXXXX")
+    trap 'rm -rf "\$tmp_dir"' EXIT
     run_deepvariant \\
         --model_type=${model_type} \\
         --ref=${ref_fasta} \\
@@ -308,13 +305,13 @@ process DEEPVARIANT {
         --output_vcf=${meta.sample_id}.vcf.gz \\
         --output_gvcf=${meta.sample_id}.g.vcf.gz \\
         --num_shards=${task.cpus} \\
-        --intermediate_results_dir=\${TMPDIR:-/tmp}/${meta.sample_id}_dv_tmp
+        --intermediate_results_dir="\$tmp_dir"
     """
 }
 
 
 // ============================================================
-//  STAGE 5B-SV: GERMLINE SV - Manta germline mode  (NEW)
+//  STAGE 5 variant_calling: MANTA_GERMLINE - germline SVs - Manta
 //
 //  Manta germline mode detects: DEL, DUP, INV, INS, BND.
 //  WES SV limits apply: only breakpoints within/near capture
@@ -325,6 +322,7 @@ process DEEPVARIANT {
 //    - output files have different names (diploidSV vs somaticSV)
 //    - no indel candidate output needed (no Strelka2 in germline)
 // ============================================================
+
 process MANTA_GERMLINE {
     tag { "${meta.sample_id}" }
     label 'process_variant'
@@ -376,7 +374,7 @@ process MANTA_GERMLINE {
 
 
 // ============================================================
-//  STAGE 6A-GERMLINE: GERMLINE CNV - GATK gCNV scatter  (NEW)
+//  STAGE 5 variant_calling: GATK_COLLECT_READ_COUNTS - gCNV - CollectReadCounts
 //
 //  GATK gCNV pipeline (3-step):
 //    Step 1: CollectReadCounts - per-sample read depth per interval
@@ -389,6 +387,7 @@ process MANTA_GERMLINE {
 //
 //  This process: Step 1 - CollectReadCounts (per sample)
 // ============================================================
+
 process GATK_COLLECT_READ_COUNTS {
     tag { "${meta.sample_id}" }
     label 'process_medium'
@@ -423,14 +422,14 @@ process GATK_COLLECT_READ_COUNTS {
 }
 
 
-
 // ============================================================
-//  STAGE 6A-GERMLINE-2: GATK gCNV - DetermineGermlineContigPloidy
+//  STAGE 5 variant_calling: GATK_PLOIDY_MODEL - gCNV - DetermineGermlineContigPloidy
 //
 //  Cohort-level ploidy estimation.
 //  Requires ALL sample count HDF5 files simultaneously.
 //  Run once per cohort batch.
 // ============================================================
+
 process GATK_PLOIDY_MODEL {
     tag   "cohort_ploidy"
     label 'process_ploidy'
@@ -442,7 +441,7 @@ process GATK_PLOIDY_MODEL {
     maxRetries    1
 
     input:
-    path  count_files             // List of all sample .counts.hdf5 files
+    path  count_files, arity: '1..*'   // List of all sample .counts.hdf5 files
     path  ref_fasta
     path  ref_fai
     path  ref_dict
@@ -456,7 +455,7 @@ process GATK_PLOIDY_MODEL {
     script:
     def inputs    = count_files.collect { v -> "-I ${v}" }.join(' \\\n        ')
     def java_opts = gatkJavaOpts(task)
-    
+
     """
     set -euo pipefail
 
@@ -482,12 +481,13 @@ process GATK_PLOIDY_MODEL {
 
 
 // ============================================================
-//  STAGE 6A-GERMLINE-3: GATK gCNV - GermlineCNVCaller (scatter)
+//  STAGE 5 variant_calling: GATK_GCNV_CALLER - gCNV - GermlineCNVCaller (per shard)
 //
 //  Runs per-shard of intervals (scatter).
 //  Each shard is an independent cohort model.
 //  Gather in PostprocessGermlineCNVCalls.
 // ============================================================
+
 process GATK_GCNV_CALLER {
     tag { "shard_${shard_index}" }
     label 'process_medium'
@@ -498,7 +498,7 @@ process GATK_GCNV_CALLER {
 
     input:
     val   shard_index
-    path  count_files             // All sample counts
+    path  count_files, arity: '1..*'   // All sample counts
     path  ploidy_calls            // From GATK_PLOIDY_MODEL
     path  preprocessed_intervals
     path  interval_shard          // This shard's interval list
@@ -543,14 +543,14 @@ process GATK_GCNV_CALLER {
 }
 
 
-
 // ============================================================
-//  STAGE 6A-GERMLINE-4: GATK gCNV - PostprocessGermlineCNVCalls
+//  STAGE 5 variant_calling: GATK_GCNV_POSTPROCESS - gCNV - PostprocessGermlineCNVCalls
 //
-//  Per-sample: gather all shard outputs - one VCF per sample.
+//  Per-sample: gather all shard outputs -> one VCF per sample.
 //  sample_index must match the order samples were passed to
 //  GermlineCNVCaller (0-based).
 // ============================================================
+
 process GATK_GCNV_POSTPROCESS {
     tag { "${meta.sample_id}" }
     label 'process_variant'
@@ -563,8 +563,8 @@ process GATK_GCNV_POSTPROCESS {
 
     input:
     tuple val(meta), val(sample_index)
-    path  calls_shards    // List of gcnv_calls_shard_* directories
-    path  model_shards    // List of gcnv_model_shard_* directories
+    path  calls_shards, arity: '1..*'   // gcnv_calls_shard_* dirs, sorted by shard (paired with model_shards)
+    path  model_shards, arity: '1..*'   // gcnv_model_shard_* dirs, same order
     path  ploidy_calls
     path  ref_fasta
     path  ref_fai
@@ -578,7 +578,7 @@ process GATK_GCNV_POSTPROCESS {
           path("${meta.sample_id}_gcnv_segments.vcf.gz.tbi"), emit: cnv_vcf
     tuple val(meta),
           path("${meta.sample_id}_gcnv_denoised_cr.tsv"), emit: denoised_cr
-          
+
     script:
     def java_opts = gatkJavaOpts(task)
     def calls_args   = calls_shards.collect { v -> "--calls-shard-path ${v}" }.join(' \\\n        ')
@@ -594,14 +594,20 @@ process GATK_GCNV_POSTPROCESS {
     mkdir -p "\$MPLCONFIGDIR" "\$XDG_CACHE_HOME" "\$TMPDIR" .pytensor
     { echo "[global]"; echo "base_compiledir=\$PWD/.pytensor"; } > "\$PYTENSORRC"
 
+    # chrX/chrY are allosomal: their reference copy number comes from the sample's contig
+    # ploidy call. Undeclared contigs are treated as autosomal (reference CN 2), which
+    # would call every male chrX/chrY interval a deletion.
+    allo=\$(awk -F'\\t' '\$1 == "@SQ" { for (i = 2; i <= NF; i++) if (\$i ~ /^SN:/) { c = substr(\$i, 4); if (c ~ /^(chr)?[XY]\$/) printf "--allosomal-contig %s ", c } }' ${ref_dict})
     gatk --java-options "${java_opts}" PostprocessGermlineCNVCalls \\
         ${calls_args} \\
+        --autosomal-ref-copy-number 2 \$allo \\
         ${model_args} \\
         --contig-ploidy-calls ${ploidy_calls} \\
         --sample-index ${sample_index} \\
         --output-genotyped-intervals  ${meta.sample_id}_gcnv_intervals.vcf.gz \\
         --output-genotyped-segments   ${meta.sample_id}_gcnv_segments.vcf.gz \\
         --output-denoised-copy-ratios ${meta.sample_id}_gcnv_denoised_cr.tsv \\
+        --tmp-dir "\$TMPDIR" \\
         --sequence-dictionary ${ref_dict}
     """
 }
@@ -626,6 +632,12 @@ process GATK_GCNV_POSTPROCESS {
 
 //  Consolidate every sample's gVCF into a per-interval GenomicsDB workspace.
 //  The gVCF list is broadcast (value channel); the interval shard drives N tasks.
+
+
+// ============================================================
+//  STAGE 5 variant_calling: GENOMICSDB_IMPORT - cohort - GenomicsDBImport (germline_filter vqsr)
+// ============================================================
+
 process GENOMICSDB_IMPORT {
     tag { "${interval_name}" }
     label 'process_variant'
@@ -636,8 +648,8 @@ process GENOMICSDB_IMPORT {
 
     input:
     tuple val(interval_name), path(interval_file)
-    path  gvcfs              // value: ALL sample gVCFs (broadcast to every shard)
-    path  gvcf_tbis
+    path  gvcfs, arity: '1..*'       // value: ALL sample gVCFs (broadcast to every shard)
+    path  gvcf_tbis, arity: '1..*'
     path  ref_fasta
     path  ref_fai
     path  ref_dict
@@ -671,6 +683,12 @@ process GENOMICSDB_IMPORT {
 
 
 // Standard Broad prep; collapses ref blocks, drops low-qual, caps allele bloat
+
+
+// ============================================================
+//  STAGE 5 variant_calling: REBLOCK_GVCF - cohort - ReblockGVCF
+// ============================================================
+
 process REBLOCK_GVCF {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -711,6 +729,12 @@ process REBLOCK_GVCF {
 }
 
 //  Joint-genotype the cohort GenomicsDB for one interval shard.
+
+
+// ============================================================
+//  STAGE 5 variant_calling: GENOTYPE_GVCFS_JOINT - cohort - GenotypeGVCFs (joint_genotyper classic)
+// ============================================================
+
 process GENOTYPE_GVCFS_JOINT {
     tag { "${interval_name}" }
     label 'process_long'
@@ -731,7 +755,7 @@ process GENOTYPE_GVCFS_JOINT {
           path("joint.${interval_name}.vcf.gz.tbi"), emit: vcf
 
     script:
-    def java_opts = gatkJavaOpts(task) 
+    def java_opts = gatkJavaOpts(task)
 
     """
     set -euo pipefail
@@ -755,6 +779,8 @@ process GENOTYPE_GVCFS_JOINT {
 
 
 // ============================================================
+//  STAGE 5 variant_calling: GNARLY_GENOTYPER - cohort - GnarlyGenotyper (joint_genotyper gnarly)
+//
 //  PATH A - GnarlyGenotyper (scalable joint genotyping)
 //
 //  Drop-in replacement for GENOTYPE_GVCFS_JOINT in the large-cohort path.
@@ -766,6 +792,7 @@ process GENOTYPE_GVCFS_JOINT {
 //  shard boundaries (records whose start is outside the shard interval are
 //  suppressed), which matters when gathering shards.
 // ============================================================
+
 process GNARLY_GENOTYPER {
     tag { "${interval_name}" }
     label 'process_variant'
@@ -834,6 +861,12 @@ process GNARLY_GENOTYPER {
 
 
 //  Gather the per-interval joint VCFs into a single cohort callset.
+
+
+// ============================================================
+//  STAGE 5 variant_calling: MERGE_COHORT_VCF - cohort - per-shard VCFs merged
+// ============================================================
+
 process MERGE_COHORT_VCF {
     tag "cohort"
     label 'process_medium'
@@ -841,8 +874,8 @@ process MERGE_COHORT_VCF {
     publishDir { "${pubDir('variant_calling', true)}/joint" }, mode: 'copy'
 
     input:
-    path vcfs
-    path tbis
+    path vcfs, arity: '1..*'
+    path tbis, arity: '1..*'
 
     output:
     tuple path("cohort_joint.vcf.gz"),
@@ -864,6 +897,12 @@ process MERGE_COHORT_VCF {
 //  Build a VQSR model for one variant class (mode is 'SNP' or 'INDEL').
 //  Resources/annotations are selected by mode; DP is dropped for exomes
 //  (uneven target coverage), MQ is used for SNPs only.
+
+
+// ============================================================
+//  STAGE 5 variant_calling: VARIANT_RECALIBRATOR - cohort - VariantRecalibrator (SNP, INDEL)
+// ============================================================
+
 process VARIANT_RECALIBRATOR {
     tag { "${mode}" }
     label 'process_variant'
@@ -936,6 +975,12 @@ process VARIANT_RECALIBRATOR {
 
 
 //  Apply a VQSR model. Run SNP first, then INDEL on the SNP-filtered VCF.
+
+
+// ============================================================
+//  STAGE 5 variant_calling: APPLY_VQSR - cohort - ApplyVQSR (SNP, INDEL)
+// ============================================================
+
 process APPLY_VQSR {
     tag { "${mode}" }
     label 'process_medium'
@@ -974,6 +1019,12 @@ process APPLY_VQSR {
 //  Split the VQSR-filtered cohort callset back to per-sample VCFs so the
 //  downstream annotation/report flow keeps its (meta, vcf, tbi) contract.
 //  Genotypes and VQSR FILTER flags are preserved; hom-ref-only sites dropped.
+
+
+// ============================================================
+//  STAGE 5 variant_calling: SPLIT_COHORT_VCF - cohort VCF split into one VCF per sample
+// ============================================================
+
 process SPLIT_COHORT_VCF {
     tag { "${meta.sample_id}" }
     label 'process_medium'
@@ -1041,6 +1092,10 @@ process SPLIT_COHORT_VCF {
 // }
 
 
+// ============================================================
+//  STAGE 5 variant_calling: BCFTOOLS_ROH - runs of homozygosity - bcftools roh (WGS)
+// ============================================================
+
 process BCFTOOLS_ROH {
     tag { "${meta.sample_id}" }
     label 'process_low'
@@ -1080,7 +1135,63 @@ process BCFTOOLS_ROH {
     """
 }
 
+
 // ============================================================
+//  STAGE 5 variant_calling: OPTITYPE - HLA class I typing - OptiType
+//
+//  HLA class I typing - OptiType (normal exome)
+//  chr6 HLA region + unplaced pairs -> FASTQ -> OptiType. BAM or CRAM input.
+// ============================================================
+
+process OPTITYPE {
+    tag { "${meta.sample_id}" }
+    label 'process_medium'
+
+    memory { 16.GB * task.attempt }
+    time   { 2.h   * task.attempt }
+
+    // -- 05 variant_calling (analysis-separated) -------------------------
+    publishDir { "${pubDir('variant_calling', true)}/hla" }, mode: 'copy',
+        pattern: '*_result.tsv'
+
+    input:
+    tuple val(meta), path(aln), path(idx)
+    path  ref_fasta
+    path  ref_fai
+
+    output:
+    tuple val(meta), path("${meta.sample_id}_result.tsv"), emit: result
+
+    script:
+    """
+    set -euo pipefail
+
+    # HLA reads: the chr6 MHC region, plus the HLA allele / chr6 alt contigs when the reference
+    # has them (GRCh38 analysis sets such as hs38DH or GDC d1.vd1 place many HLA reads there),
+    # plus unmapped reads.
+    # Whole-contig regions are written {name}: HLA allele contigs contain ':' and '*'.
+    mapfile -t mhc < <(samtools view -H ${aln} | awk -F'\\t' '\$1 == "@SQ" { for (i = 2; i <= NF; i++) if (\$i ~ /^SN:/) {
+            c = substr(\$i, 4); if (c ~ /^(chr)?6\$/) print c ":29600000-33500000"; else if (c ~ /^HLA-/ || c ~ /^chr6_.*_alt\$/) print "{" c "}" } }')
+    [ "\${#mhc[@]}" -gt 0 ] || { echo "ERROR: no chr6 contig in ${aln} header" >&2; exit 1; }
+    samtools view -@ ${task.cpus} -T ${ref_fasta} -b -o hla_reads.bam ${aln} "\${mhc[@]}" '*'
+    samtools collate -@ ${task.cpus} -O hla_reads.bam collate_tmp \\
+        | samtools fastq -@ ${task.cpus} -n -1 hla_R1.fastq -2 hla_R2.fastq -0 /dev/null -s /dev/null -
+
+    optitype run \\
+        -i hla_R1.fastq -i hla_R2.fastq \\
+        --dna \\
+        --prefix ${meta.sample_id} \\
+        --threads ${task.cpus} \\
+        -o optitype_out
+    cp optitype_out/${meta.sample_id}_result.tsv .
+    rm -f hla_reads.bam hla_R1.fastq hla_R2.fastq
+    """
+}
+
+
+// ============================================================
+//  STAGE 7 classification: CONSOLIDATE_GERMLINE_REPORT - consolidated germline report per sample
+//
 //  PHASE 1: CONSOLIDATED GERMLINE REPORT
 //
 //  One sectioned TSV per sample, mirroring CONSOLIDATE_PATIENT_REPORT
@@ -1094,6 +1205,7 @@ process BCFTOOLS_ROH {
 //  Every section is defensive: missing/empty inputs yield a "(no ...)"
 //  placeholder instead of failing, so partial runs still report.
 // ============================================================
+
 process CONSOLIDATE_GERMLINE_REPORT {
     tag { "${sample_id}" }
     label 'process_low'
@@ -1116,112 +1228,9 @@ process CONSOLIDATE_GERMLINE_REPORT {
     script:
     def clin_min   = params.germline_report_clin_min ?: 'pathogenic'
     def lof_max_af = (params.germline_lof_max_af != null) ? params.germline_lof_max_af : 0.01
+    def min_stars  = (params.clinvar_min_stars != null) ? params.clinvar_min_stars : 1
     """
-    set -uo pipefail
-    REPORT=${sample_id}_germline_consolidated.tsv
-
-    {
-      echo "## ============================================================"
-      echo "## CONSOLIDATED GERMLINE REPORT - SAMPLE: ${sample_id}"
-      echo "## Generated: \$(date '+%Y-%m-%d %H:%M:%S')"
-      echo "## NOTE: computational summary for review; not a final ACMG clinical classification."
-      echo "## ============================================================"
-    } > \$REPORT
-
-    # -- [1] SNV/indel - pull ClinVar-flagged calls from the VEP VCF ----------
-    printf '\\n## [1] GERMLINE SNV/INDEL  (VEP+ClinVar; CLIN_SIG matching "%s")\\n' "${clin_min}" >> \$REPORT
-    if [ -s snv.vcf.gz ]; then
-      printf 'CHROM\\tPOS\\tREF\\tALT\\tGENE\\tCONSEQUENCE\\tIMPACT\\tMAX_AF\\tClinVar\\tGT\\n' >> \$REPORT
-      # split-vep flattens the per-transcript CSQ; keep the worst consequence.
-      # Filter to rows whose ClinVar significance contains the requested term
-      # (case-insensitive); if split-vep lacks the field, emit a note.
-      csq_fields=\$(bcftools +split-vep -l snv.vcf.gz 2>/dev/null)
-      if grep -qiw CLIN_SIG <<< "\$csq_fields"; then
-        # PASS-only; 'conflicting...pathogenicity' contains the substring
-        # 'pathogenic' and must not be reported as pathogenic.
-        bcftools view -f PASS,. -Ou snv.vcf.gz 2>/dev/null \\
-        | bcftools +split-vep -s worst -d \\
-          -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t%SYMBOL\\t%Consequence\\t%IMPACT\\t%MAX_AF\\t%CLIN_SIG\\t[%GT]\\n' \\
-          - 2>/dev/null \\
-          | awk -F'\\t' -v term="${clin_min}" 'tolower(\$9) ~ tolower(term) && tolower(\$9) !~ /conflicting/' \\
-          | sort -u >> \$REPORT \\
-          || echo "(SNV query failed)" >> \$REPORT
-      else
-        echo "(VEP VCF has no CLIN_SIG field; run ANNOTATE_VCF with ClinVar)" >> \$REPORT
-      fi
-    else echo "(no annotated SNV/indel VCF)" >> \$REPORT; fi
-
-    # -- [1b] LoF in reportable genes (tumour-agnostic, parameter-driven gene set) -----
-    #   gene set = CGC genes flagged GERMLINE (params.cosmic_cgc_tsv) + params.germline_report_genes.
-    #   One consequence per gene (VEP PICK) when present. Not LOFTEE-filtered (last-exon /
-    #   NMD-escape not assessed) - every call needs review.
-    : > report_genes.txt
-    if [ -n "${cgc_tsv}" ]; then
-        if echo "${cgc_tsv}" | grep -q '[.]gz\$'; then CATC=zcat; else CATC=cat; fi
-        "\$CATC" "${cgc_tsv}" | awk -F'\\t' '
-            NR == 1 { for (i = 1; i <= NF; i++) { h = toupper(\$i); gsub(/[ ]+/, "_", h)
-                          if (h == "GENE_SYMBOL") g = i; if (h == "GERMLINE") m = i }
-                      next }
-            g && m && tolower(\$m) ~ /^y/ && \$g != "" { print toupper(\$g) }' >> report_genes.txt || true
-    fi
-    if [ -n "${gene_list}" ]; then
-        grep -v -E '^[[:space:]]*(#|\$)' "${gene_list}" | awk '{ print toupper(\$1) }' >> report_genes.txt || true
-    fi
-    sort -u -o report_genes.txt report_genes.txt
-    n_genes=\$(grep -c . report_genes.txt || true)
-    printf '\\n## [1b] GERMLINE LoF (HIGH impact) IN REPORTABLE GENES  (%s genes; MAX_AF < %s; not LOFTEE-filtered)\\n' "\$n_genes" "${lof_max_af}" >> \$REPORT
-    if [ "\$n_genes" -eq 0 ]; then
-        echo "(no reportable gene set: set params.germline_report_genes and/or a CGC file with a GERMLINE column)" >> \$REPORT
-    elif [ -s snv.vcf.gz ]; then
-        printf 'CHROM\\tPOS\\tREF\\tALT\\tGENE\\tCONSEQUENCE\\tIMPACT\\tMAX_AF\\tClinVar\\tGT\\n' >> \$REPORT
-        fields=\$(bcftools +split-vep -l snv.vcf.gz 2>/dev/null | awk '{ print \$2 }')
-        clin=\$(echo "\$fields" | grep -qx CLIN_SIG && echo '%CLIN_SIG' || echo '.')
-        maf=\$(echo "\$fields"  | grep -qx MAX_AF   && echo '%MAX_AF'   || echo '.')
-        fmt="%CHROM\\t%POS\\t%REF\\t%ALT\\t%SYMBOL\\t%Consequence\\t%IMPACT\\t\${maf}\\t\${clin}\\t[%GT]\\n"
-        lof_filter() { awk -F'\\t' -v maxaf="${lof_max_af}" '
-            BEGIN { while ((getline g < "report_genes.txt") > 0) G[g] = 1 }
-            \$7 == "HIGH" && (toupper(\$5) in G) && (\$8 == "" || \$8 == "." || \$8 + 0 < maxaf + 0)'; }
-        if echo "\$fields" | grep -qx PICK; then
-            bcftools view -f PASS,. -Ou snv.vcf.gz 2>/dev/null \\
-            | bcftools +split-vep -d -f "%PICK\\t\${fmt}" - 2>/dev/null \\
-            | awk -F'\\t' '\$1 == "1"' | cut -f2- | lof_filter | sort -u >> \$REPORT \\
-            || echo "(LoF query failed)" >> \$REPORT
-        else
-            bcftools view -f PASS,. -Ou snv.vcf.gz 2>/dev/null \\
-            | bcftools +split-vep -s worst -d -f "\${fmt}" - 2>/dev/null \\
-            | lof_filter | sort -u >> \$REPORT \\
-            || echo "(LoF query failed)" >> \$REPORT
-        fi
-    else echo "(no annotated SNV/indel VCF)" >> \$REPORT; fi
-
-    # AnnotSV rows worth reading: one row per SV (Annotation_mode=full), kept when
-    # ACMG class 4/5 OR overlapping a reportable gene. Unknown layout -> all rows.
-    filter_annotsv() {
-        awk -F'\\t' 'BEGIN { while ((getline g < "report_genes.txt") > 0) G[g] = 1 }
-            NR == 1 { for (i = 1; i <= NF; i++) h[\$i] = i; print; next }
-            { if (("Annotation_mode" in h) && \$(h["Annotation_mode"]) != "full") next
-              keep = !(("ACMG_class" in h) || ("Gene_name" in h))
-              if (("ACMG_class" in h) && \$(h["ACMG_class"]) ~ /(^|=)(4|5)\$/) keep = 1
-              if (!keep && ("Gene_name" in h)) {
-                  n = split(toupper(\$(h["Gene_name"])), gs, /[;,]/)
-                  for (j = 1; j <= n; j++) if (gs[j] in G) { keep = 1; break } }
-              if (keep) print }' "\$1"
-    }
-
-    # -- [2] SV - AnnotSV (Manta diploidSV), ACMG class 4/5 highlighted ------
-    printf '\\n## [2] GERMLINE SV  (AnnotSV, Manta diploidSV; full rows, ACMG 4/5 or reportable gene)\\n' >> \$REPORT
-    if [ -s sv_annotsv.tsv ] && [ \$(wc -l < sv_annotsv.tsv) -gt 1 ]; then
-      filter_annotsv sv_annotsv.tsv >> \$REPORT
-    else echo "(no annotated SV output)" >> \$REPORT; fi
-
-    # -- [3] CNV - AnnotSV (gCNV segments) -----------------------------------
-    printf '\\n## [3] GERMLINE CNV  (AnnotSV, GATK gCNV segments; full rows, ACMG 4/5 or reportable gene)\\n' >> \$REPORT
-    if [ -s cnv_annotsv.tsv ] && [ \$(wc -l < cnv_annotsv.tsv) -gt 1 ]; then
-      filter_annotsv cnv_annotsv.tsv >> \$REPORT
-    else echo "(no annotated CNV output)" >> \$REPORT; fi
-
-    # -- [4] ROH - bcftools roh region records -------------------------------
-    printf '\\n## [4] RUNS OF HOMOZYGOSITY  (bcftools roh, region-level)\\n' >> \$REPORT
-    if [ -s roh.txt ]; then cat roh.txt >> \$REPORT; else echo "(no ROH output)" >> \$REPORT; fi
+    germline_report.sh --sample ${sample_id} --clin-min "${clin_min}" --lof-max-af ${lof_max_af} \\
+        --min-stars ${min_stars} ${cgc_tsv ? "--cgc ${cgc_tsv}" : ''} ${gene_list ? "--gene-list ${gene_list}" : ''}
     """
 }

@@ -9,7 +9,7 @@ include { gatkJavaOpts; pubDir } from './utils'
 
 
 // ============================================================
-//  STAGE P1 (scatter): Mutect2 tumor-only mode per normal, per interval
+//  PON STEP 1: PON_MUTECT2 - Mutect2 tumor-only mode per normal (per shard)
 //  NOTE: --max-mnp-distance 0 is NOT optional - GATK's own docs flag this
 //  as a required workaround for a GenomicsDBImport bug on MNP records.
 // ============================================================
@@ -36,7 +36,7 @@ process PON_MUTECT2 {
     """
     set -euo pipefail
 
-    tmp_dir="\${TMPDIR:-/tmp}/${meta.sample_id}_${interval_name}_ponm2_tmp"
+    tmp_dir=\$(mktemp -d "\${TMPDIR:-/tmp}/${meta.sample_id}_${interval_name}_ponm2_tmp.XXXXXX")
     mkdir -p "\$tmp_dir"
     trap 'rm -rf "\$tmp_dir"' EXIT
 
@@ -52,7 +52,7 @@ process PON_MUTECT2 {
 
 
 // ============================================================
-//  STAGE P2 (gather): merge one normal's scattered chunks into one VCF
+//  PON STEP 2: PON_MERGE_NORMAL - one normal's shards merged into one VCF
 //  No FilterMutectCalls here - GATK's PON recipe feeds RAW tumor-only calls
 //  straight into GenomicsDBImport; filtering is not part of this workflow.
 // ============================================================
@@ -64,7 +64,7 @@ process PON_MERGE_NORMAL {
     publishDir { "${params.outdir}/00_reference/pon/per_normal" }, mode: 'copy'
 
     input:
-    tuple val(meta), path(vcf_chunks), path(tbi_chunks)
+    tuple val(meta), path(vcf_chunks, arity: '1..*'), path(tbi_chunks, arity: '1..*')   // list even for one shard
 
     output:
     tuple val(meta),
@@ -84,7 +84,7 @@ process PON_MERGE_NORMAL {
 
 
 // ============================================================
-//  STAGE P3: GenomicsDBImport - combine ALL normals' VCFs into one DB
+//  PON STEP 3: PON_GENOMICSDB_IMPORT - all normals combined (per shard)
 //  Scattered by the SAME interval shards as PON_MUTECT2 (keeps DB build
 //  parallel and memory-bounded; --batch-size caps concurrent sample readers,
 //  which is what actually controls GenomicsDBImport's memory footprint on
@@ -98,8 +98,8 @@ process PON_GENOMICSDB_IMPORT {
 
     input:
     tuple val(interval_name), path(interval_file)
-    path  normal_vcfs   // all per-normal *_for_pon.vcf.gz, collected
-    path  normal_tbis   // all per-normal *_for_pon.vcf.gz.tbi, collected
+    path  normal_vcfs, arity: '1..*'   // all per-normal *_for_pon.vcf.gz, collected
+    path  normal_tbis, arity: '1..*'   // all per-normal *_for_pon.vcf.gz.tbi, collected
     path  ref_fasta
     path  ref_fai
     path  ref_dict
@@ -110,7 +110,7 @@ process PON_GENOMICSDB_IMPORT {
     script:
     def java_opts  = gatkJavaOpts(task)
     def vcf_inputs = normal_vcfs.collect { v -> "-V ${v}" }.join(' \\\n        ')
-    def batch_size = params.pon_genomicsdb_batch_size ?: 50
+    def batch_size = params.pon_genomicsdb_batch_size ?: 15
     """
     set -euo pipefail
 
@@ -131,7 +131,7 @@ process PON_GENOMICSDB_IMPORT {
 
 
 // ============================================================
-//  STAGE P4: CreateSomaticPanelOfNormals per interval shard
+//  PON STEP 4: PON_CREATE_SHARD - CreateSomaticPanelOfNormals (per shard)
 //  --germline-resource (gnomAD) lets the tool exclude likely-germline sites
 //  (--max-germline-probability, default 0.5) - real germline filtering still
 //  belongs to Mutect2's own --germline-resource model at call time; this
@@ -179,7 +179,7 @@ process PON_CREATE_SHARD {
 
 
 // ============================================================
-//  STAGE P5 (gather): merge shard PONs into the final panel_of_normals.vcf.gz
+//  PON STEP 5: PON_MERGE_FINAL - shard panels merged into panel_of_normals.vcf.gz
 // ============================================================
 
 process PON_MERGE_FINAL {
@@ -191,8 +191,8 @@ process PON_MERGE_FINAL {
     publishDir { "${params.outdir}/00_reference/final_pon" }, mode: 'copy'
 
     input:
-    path pon_vcf_chunks
-    path pon_tbi_chunks
+    path pon_vcf_chunks, arity: '1..*'
+    path pon_tbi_chunks, arity: '1..*'
     path ref_dict
 
     output:

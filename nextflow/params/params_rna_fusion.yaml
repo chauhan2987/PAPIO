@@ -1,0 +1,75 @@
+# ==============================================================================
+#  PAPIO - RNA fusion detection (bulk RNA-seq)
+#  Demo data: HCC1395 RNA-seq SRR9134735 - samplesheets/rna_fusion.csv
+#
+#  1. bash scripts/download_demo_fastq.sh /path/to/demo
+#  2. edit every /path/to/... below
+#  3. bash scripts/check_installation.sh params/params_rna_fusion.yaml
+#  4. nextflow run main.nf -params-file params/params_rna_fusion.yaml         # LSF (default)
+#     add  -profile slurm  or  -profile local  on other systems
+#
+#  STAR, Arriba and RNA QC use the DNA genome (GRCh38.d1.vd1) with GENCODE v49
+#  (= Ensembl 115, the DNA arm's annotation); STAR-Fusion and FusionInspector use
+#  the CTAT library (GENCODE v44). The GTF, FASTA and STAR index must match each
+#  other (same contig names), otherwise STAR-Fusion reports nothing.
+# ==============================================================================
+
+# ---- run paths ---------------------------------------------------------------
+pipeline_root   : /path/to/PAPIO
+work_root       : /path/to/run/rna_demo
+outdir          : /path/to/run/rna_demo/Result
+container_dir   : /path/to/papio_containers
+bind_paths      : ['/path/to/papio_resources', '/path/to/run', '/path/to/demo']
+
+# ---- input -------------------------------------------------------------------
+fastq_root      : /path/to/demo/fastq
+rna_samplesheet : /path/to/demo/samplesheets/rna_fusion.csv
+
+# ---- mode --------------------------------------------------------------------
+assay    : rna
+analysis : rna_fusion
+start_at : mapping
+stop_at  : classification
+
+# ---- genome, GENCODE v49 and STAR index (built by setup.sh --full) -------------
+rna_use_ctat_reference : false
+ref_fasta : /path/to/papio_resources/genome/GRCh38.d1.vd1.fa
+ref_fai   : /path/to/papio_resources/genome/GRCh38.d1.vd1.fa.fai
+gtf       : /path/to/papio_resources/gencode/gencode.v49.annotation.gtf
+star_index: /path/to/papio_resources/star/StarIndex_gencode_v49
+
+# ---- CTAT library (GENCODE v44): STAR-Fusion and FusionInspector --------------
+ctat_lib  : /path/to/papio_resources/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.plug-n-play/ctat_genome_lib_build_dir
+
+# ---- RNA QC (optional) -------------------------------------------------------
+refflat            : /path/to/papio_resources/rna_qc/gencode.v49.refFlat
+rrna_interval_list : /path/to/papio_resources/rna_qc/gencode.v49.rrna.interval_list
+
+# ---- expression and immune features (optional; each step runs when its resource is set) ----
+salmon_index   : /path/to/papio_resources/salmon/SalmonIndex_gencode_v49     # Salmon quantification (GENCODE v49, decoy-aware)
+trust4_ref_dir : /path/to/papio_resources/trust4                             # TRUST4 TCR/BCR repertoire
+telescope_gtf  : /path/to/papio_resources/telescope/HERV_rmsk.hg38.v2.gtf    # Telescope HERV expression
+
+# ---- fusion callers ----------------------------------------------------------
+use_arriba          : true
+use_starfusion      : true
+use_fusioncatcher   : true
+use_fusioninspector : true
+
+arriba_blacklist       : /path/to/papio_resources/arriba/blacklist_hg38_GRCh38_v2.5.1.tsv.gz
+arriba_known_fusions   : /path/to/papio_resources/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz
+arriba_protein_domains : /path/to/papio_resources/arriba/protein_domains_hg38_GRCh38_v2.5.1.gff3
+fusioncatcher_db       : /path/to/papio_resources/fusioncatcher/human_v102
+known_fusions_tsv      : /path/to/papio_resources/fusion/known_fusions.tsv
+cosmic_cgc_tsv         : /path/to/papio_resources/cosmic/Cosmic_CancerGeneCensus_v101_GRCh38.tsv.gz   # COSMIC licence
+
+# ---- consensus ---------------------------------------------------------------
+# fusion_min_callers: 2 = PASS_CONSENSUS needs >= 2 callers. Fusions below the
+# threshold are NOT discarded: they are kept and labelled (REVIEW, or PASS_KNOWN
+# when in the known-fusion catalog). Set 1 to treat every caller's call as PASS.
+fusion_min_callers    : 2
+fusion_readthrough_kb : 200
+rna_shared_star       : false
+
+# ---- scheduler ---------------------------------------------------------------
+lsf_project : null

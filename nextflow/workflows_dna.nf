@@ -9,7 +9,7 @@ nextflow.enable.dsl = 2
 //  ------------------- stage 0 -------------------------------
 //  ------------------------ utils ----------------------------
 include { GENERATE_META_INFO          } from './utils'
-include { stageRankMap; stageRuns     } from './utils'
+include { stageRankMap; stageRuns; naturalCompare } from './utils'
 
 //  ---------------- components_common ------------------------
 include { MANIFEST_ROW                } from './components_common'
@@ -44,23 +44,27 @@ include { METRICS                     } from './components_common'
 include { VERIFYBAMID2                } from './components_common'
 include { QC_GATE;QC_GATE_SUMMARY     } from './components_common'
 include { SOMALIER_EXTRACT            } from './components_common'
+include { SOMALIER_ANCESTRY           } from './components_common'
 include { SOMALIER_RELATE             } from './components_common'
 include { CHECK_SAMPLE_SWAPS          } from './components_common'
 
 //  ------------------- stage 4 -------------------------------
 //  ---------------- components_common ------------------------
 include { BASE_RECALIBRATOR           } from './components_common'
+include { GATHER_BQSR_REPORTS         } from './components_common'
 include { APPLY_BQSR                  } from './components_common'
 
 //  ------------------- stage 5 -------------------------------
 //  ---------------- components_common ------------------------
 include { MUTATIONAL_SIGNATURES       } from './components_common'
 include { CNVKIT                      } from './components_common'
+include { CNVKIT_CALL                 } from './components_common'
 include { MSISENSOR_PRO;CLASSIFY_MSI  } from './components_common'
 include { MSISENSOR_GENE_MAP          } from './components_common'
 include { GETPILEUPSUMMARIES          } from './components_common'
 include { CALCULATE_CONTAMINATION     } from './components_common'
 include { LEARN_READ_ORIENTATION_MODEL } from './components_common'
+include { EVIDENCE_BAM                } from './components_common'
 //  --------------- components_germline -----------------------
 include { HAPLOTYPECALLER             } from './components_germline'
 include { MERGE_GVCFS                 } from './components_germline'
@@ -84,12 +88,14 @@ include { GATK_PLOIDY_MODEL           } from './components_germline'
 include { GATK_GCNV_CALLER            } from './components_germline'
 include { GATK_GCNV_POSTPROCESS       } from './components_germline'
 include { BCFTOOLS_ROH                } from './components_germline'
+include { OPTITYPE                    } from './components_germline'
 //  --------------- components_somatic ------------------------
 include { MANTA                       } from './components_somatic'
 include { STRELKA2;TAG_STRELKA_AF     } from './components_somatic'
 include { MUSE_CALL;MUSE_SUMP         } from './components_somatic'
 include { TAG_MUSE_AF                 } from './components_somatic'
 include { VARSCAN;TAG_VARSCAN_AF      } from './components_somatic'
+include { VARSCAN_MERGE               } from './components_somatic'
 include { MUTECT2;MERGE_MUTECT2       } from './components_somatic'
 include { ENSEMBLE_CONSENSUS          } from './components_somatic'
 include { FILTER_SOMATIC_VCF          } from './components_somatic'
@@ -148,10 +154,17 @@ workflow RUN_BQSR {
     ch_known_indels
     ch_known_indels_tbi
     ch_interval_bed
+    ch_scatter_intervals
 
     main:
+    // WGS: one BaseRecalibrator task per scatter shard, tables gathered (GATK WGS
+    // practice). WES: one task on the capture BED, exactly as before.
+    ch_bqsr_shards = (params.assay == 'wgs')
+        ? ch_scatter_intervals
+        : channel.of(tuple('all', []))
+
     BASE_RECALIBRATOR(
-        ch_bam_bai,
+        ch_bam_bai.combine(ch_bqsr_shards),
         ch_ref_fasta, ch_ref_fai, ch_ref_dict,
         ch_dbsnp, ch_dbsnp_tbi,
         ch_mills, ch_mills_tbi,
@@ -159,7 +172,17 @@ workflow RUN_BQSR {
         ch_interval_bed
     )
 
-    ch_bqsr_input = ch_bam_bai.join(BASE_RECALIBRATOR.out.recal_table, by: 0)
+    GATHER_BQSR_REPORTS(
+        BASE_RECALIBRATOR.out.recal_table
+            .map { meta, tbl -> tuple(meta.sample_id, meta, tbl) }
+            .groupTuple(by: 0)
+            .map { _sid, metas, tbls -> tuple(metas[0], tbls.sort { t -> t.name }) }
+    )
+
+    ch_bqsr_input = ch_bam_bai
+        .map { meta, bam, bai -> tuple(meta.sample_id, meta, bam, bai) }
+        .join(GATHER_BQSR_REPORTS.out.recal_table.map { meta, tbl -> tuple(meta.sample_id, tbl) }, by: 0)
+        .map { _sid, meta, bam, bai, tbl -> tuple(meta, bam, bai, tbl) }
 
     APPLY_BQSR(
         ch_bqsr_input,
@@ -192,7 +215,7 @@ workflow QC_BLOCK {
     INFER_SEX(MOSDEPTH.out.summary)
     SAMTOOLS_STATS(ch_bam_bai, ch_ref_fasta, ch_ref_fai)
     METRICS(ch_bam_bai, ch_ref_fasta, ch_ref_fai, ch_ref_dict, ch_bait_interval_list, ch_target_interval_list)
- 
+
     ch_qc_mixed = MOSDEPTH.out.summary.map          { _m, f -> f }
         .mix( MOSDEPTH.out.global_dist.map           { _m, f -> f } )
         .mix( MOSDEPTH.out.region_dist.map           { _m, f -> f } )
@@ -229,24 +252,27 @@ workflow QC_BLOCK {
             .join( ch_contamination.map { meta, sm -> tuple(meta.sample_id, sm) }, by: 0, remainder: true )
             .join( METRICS.out.hs_metrics.map { meta, hs -> tuple(meta.sample_id, hs) }, by: 0, remainder: true )
             .join( SAMTOOLS_STATS.out.stats.map { meta, st -> tuple(meta.sample_id, st) }, by: 0, remainder: true )
+            .join( MOSDEPTH.out.global_dist.map { meta, gd -> tuple(meta.sample_id, gd) }, by: 0, remainder: true )
             .map { row ->
                 def meta = row[1]; def summ = row[2]
                 def sm = row.size()>3 ? (row[3]?:[]) : []
                 def hs = row.size()>4 ? (row[4]?:[]) : []
                 def st = row.size()>5 ? (row[5]?:[]) : []
-                tuple(meta, summ, sm, hs, st)
+                def gd = row.size()>6 ? (row[6]?:[]) : []
+                tuple(meta, summ, sm, hs, st, gd)
             }
         QC_GATE(ch_qc_gate_input)
-        QC_GATE_SUMMARY( QC_GATE.out.report.map { _meta, tsv -> tsv }.collect() )
+        QC_GATE_SUMMARY( QC_GATE.out.report.map { _meta, tsv -> tsv }.collect(sort: true) )
     }
 
     ch_qc_mixed
-        .collect()
-        .map { files -> tuple("04_metrics", files) }
+        .collect(sort: true)
+        .map { files -> tuple("03_metrics", files) }
         | MULTIQC_METRICS
 
     emit:
     mosdepth_summary = MOSDEPTH.out.summary
+    depth_quantized  = MOSDEPTH.out.quantized
     contamination    = ch_contamination
 }
 
@@ -308,7 +334,7 @@ workflow GERMLINE_BLOCK {
         ch_gvcf_chunks = HAPLOTYPECALLER.out.gvcf_chunk
             .map { meta, _iname, gvcf, tbi -> tuple(meta.sample_id, meta, gvcf, tbi) }
             .groupTuple(by: 0)
-            .map { _sid, metas, gvcfs, tbis -> tuple(metas[0], gvcfs, tbis) }
+            .map { _sid, metas, gvcfs, tbis -> tuple(metas[0], gvcfs.sort { g -> g.name }, tbis.sort { t -> t.name }) }
 
         MERGE_GVCFS(ch_gvcf_chunks, ch_ref_fasta, ch_ref_fai, ch_ref_dict)
         ch_gvcf = MERGE_GVCFS.out.gvcf
@@ -336,9 +362,9 @@ workflow GERMLINE_BLOCK {
 
             // Reblock per sample (GnarlyGenotyper
             // REQUIRES the -do-qual-approx annotation ReblockGVCF adds).
-            def use_gnarly = (params.joint_genotyper ?: 'gnarly') == 'gnarly'
+            def use_gnarly = (params.joint_genotyper ?: 'classic') == 'gnarly'
 
-            def do_reblock = use_gnarly || (params.reblock_gvcf ?: false)
+            def do_reblock = use_gnarly || (params.reblock_gvcf != false)
 
             if (do_reblock) {
                 REBLOCK_GVCF(ch_gvcf, ch_ref_fasta, ch_ref_fai, ch_ref_dict)
@@ -347,8 +373,8 @@ workflow GERMLINE_BLOCK {
                 ch_gvcf_for_db = ch_gvcf
             }
 
-            ch_all_gvcfs = ch_gvcf_for_db.map { _m, g, _t -> g }.collect()
-            ch_all_tbis  = ch_gvcf_for_db.map { _m, _g, t -> t }.collect()
+            ch_all_gvcfs = ch_gvcf_for_db.map { _m, g, _t -> g }.collect(sort: true)
+            ch_all_tbis  = ch_gvcf_for_db.map { _m, _g, t -> t }.collect(sort: true)
             ch_gdb_shards = ch_germ_scatter
 
             GENOMICSDB_IMPORT(
@@ -374,8 +400,8 @@ workflow GERMLINE_BLOCK {
             }
 
             MERGE_COHORT_VCF(
-                ch_joint_vcf.map { _n, vcf, _t -> vcf }.collect(),
-                ch_joint_vcf.map { _n, _v, tbi -> tbi }.collect()
+                ch_joint_vcf.map { _n, vcf, _t -> vcf }.collect(sort: true),
+                ch_joint_vcf.map { _n, _v, tbi -> tbi }.collect(sort: true)
             )
 
             // VQSR: build SNP + INDEL models on the cohort VCF, then apply
@@ -421,8 +447,19 @@ workflow GERMLINE_BLOCK {
             SPLIT_COHORT_VCF(ch_split_in, ch_ref_fasta, ch_ref_fai, ch_ref_dict)
             ch_snv_vcf = SPLIT_COHORT_VCF.out.vcf
 
+        } else if (params.germline_filter == 'none') {
+            // -- SINGLE-SAMPLE, UNFILTERED: GenotypeGVCFs output as the final callset.
+            //    On WES the WGS-tuned CNN tranches lowered F1 in our HG002 benchmark.
+            GENOTYPE_GVCFS(
+                ch_gvcf,
+                ch_ref_fasta, ch_ref_fai, ch_ref_dict,
+                ch_dbsnp, ch_dbsnp_tbi,
+                ch_interval_bed
+            )
+            ch_snv_vcf = GENOTYPE_GVCFS.out.vcf
+
         } else {
-            // -- SINGLE-SAMPLE PATH (default): per-sample genotype + NV filter --
+            // -- SINGLE-SAMPLE PATH: per-sample genotype + NV filter --
             GENOTYPE_GVCFS(
                 ch_gvcf,
                 ch_ref_fasta, ch_ref_fai, ch_ref_dict,
@@ -455,7 +492,7 @@ workflow GERMLINE_BLOCK {
 
 
     // -- ROH - runs of homozygosity (Phase 2) ------------------
-    //   Runs on the final per-sample SNV/indel callset. 
+    //   Runs on the final per-sample SNV/indel callset.
     //   Reliable only on dense (WGS) callsets WITH a population-AF file.
     //   WES marker density is too sparse for the HMM, and self-estimated AF
     //   from a single sample is not meaningful - so ROH is gated on both.
@@ -483,6 +520,11 @@ workflow GERMLINE_BLOCK {
         log.info "Germline ROH skipped (params.run_roh = false)."
     }
 
+
+    // -- HLA class I typing (OptiType) on normals ---------------
+    if (params.run_optitype) {
+        OPTITYPE(ch_germ_bam_bai, ch_ref_fasta, ch_ref_fai)
+    }
 
     // -- SV - Manta germline -----------------------------------
     MANTA_GERMLINE(
@@ -556,8 +598,13 @@ workflow GERMLINE_BLOCK {
             ch_gcnv_annotated_intervals
         )
 
-        ch_gcnv_calls  = GATK_GCNV_CALLER.out.shard_output.map { _i, _m, calls -> calls }.collect()
-        ch_gcnv_models = GATK_GCNV_CALLER.out.shard_output.map { _i, model, _c -> model }.collect()
+        // Calls and models taken from ONE list sorted by shard name, so the i-th
+        // --calls-shard-path and i-th --model-shard-path are the same shard, in genomic
+        // (natural shard-name) order, and the POSTPROCESS input hash is stable for -resume.
+        ch_gcnv_out_sorted = GATK_GCNV_CALLER.out.shard_output
+            .toSortedList { a, b -> naturalCompare(a[0].toString(), b[0].toString()) }
+        ch_gcnv_calls  = ch_gcnv_out_sorted.map { rows -> rows.collect { r -> r[2] } }.first()
+        ch_gcnv_models = ch_gcnv_out_sorted.map { rows -> rows.collect { r -> r[1] } }.first()
 
         // build (meta, index) from the SAME sorted list used
         // for ch_all_counts - guarantees --sample-index matches the
@@ -622,14 +669,28 @@ workflow SOMATIC_BLOCK {
     ch_tumor = ch_bam_bai.filter { meta, _b, _i -> meta.type == 'DT' }
     ch_normal = ch_bam_bai.filter { meta, _b, _i -> meta.type == 'DN' }
 
+    // combine (not join): every tumour of a patient pairs with that patient's normal
+    // (multi-region / longitudinal). join would pair only one tumour per key.
+    // normal_id = the normal's read-group SM, used by Mutect2 -normal and the filters.
     ch_paired = ch_tumor
         .map { meta, bam, bai -> tuple(meta.patient_id, meta, bam, bai) }
-        .join(
-            ch_normal.map { meta, bam, bai -> tuple(meta.patient_id, bam, bai) },
-            by: 0, remainder: false
+        .combine(
+            ch_normal.map { meta, bam, bai -> tuple(meta.patient_id, meta.sample_id, bam, bai) },
+            by: 0
         )
-        .map { _pid, t_meta, t_bam, t_bai, n_bam, n_bai ->
-            tuple(t_meta, t_bam, t_bai, n_bam, n_bai)
+        .map { _pid, t_meta, t_bam, t_bai, n_id, n_bam, n_bai ->
+            tuple(t_meta + [normal_id: n_id], t_bam, t_bai, n_bam, n_bai)
+        }
+
+    // Side channel (does not feed any process): the join above drops a tumour whose
+    // patient has no DN sample WITHOUT any message. Make that visible.
+    ch_tumor.map { meta, _b, _i -> tuple(meta.patient_id, 'DT') }
+        .mix(ch_normal.map { meta, _b, _i -> tuple(meta.patient_id, 'DN') })
+        .groupTuple(by: 0)
+        .map { pid, types ->
+            if (!('DN' in types))
+                log.warn "Patient ${pid}: tumour (DT) has no matched normal (DN) - EXCLUDED from somatic calling."
+            pid
         }
 
     // SV first - feeds Strelka2 indel candidates
@@ -681,14 +742,23 @@ workflow SOMATIC_BLOCK {
     // VarScan2 - deep-data-safe indel caller (pileup-based, no realigner to
     // crash on high-depth data). Runs on the paired BAMs directly, like MuSE.
     if (params.use_varscan_in_consensus) {
+        // WGS: scatter by shard; WES: one task on the capture BED (unchanged behaviour).
+        ch_vs_shards = (params.assay == 'wgs') ? ch_scatter_intervals : channel.of(tuple('all', []))
         VARSCAN(
-            ch_paired,
+            ch_paired.combine(ch_vs_shards),
             ch_ref_fasta, ch_ref_fai,
             ch_interval_bed
         )
+        VARSCAN_MERGE(
+            VARSCAN.out.vcf_chunk
+                .map { meta, snv, indel -> tuple(meta.sample_id, meta, snv, indel) }
+                .groupTuple(by: 0)
+                .map { _sid, metas, snvs, indels -> tuple(metas[0], snvs.sort { v -> v.name }, indels.sort { v -> v.name }) },
+            ch_ref_fai
+        )
         // VarScan's AD is alt-only and FREQ is a percent string; normalize to
         // standard AF/AD so downstream consensus/filter/vcf2maf are consistent.
-        TAG_VARSCAN_AF(VARSCAN.out.vcf, ch_ref_fasta, ch_ref_fai)
+        TAG_VARSCAN_AF(VARSCAN_MERGE.out.vcf, ch_ref_fasta, ch_ref_fai)
     }
 
     ch_mutect_input = ch_paired.combine(ch_scatter_intervals)
@@ -699,28 +769,21 @@ workflow SOMATIC_BLOCK {
         ch_panel_of_normals, ch_panel_of_normals_tbi
     )
 
-    // Use later
-    // ch_m2 = ch_paired.combine(ch_scatter_intervals)   // (meta, tbam, tbai, nbam, nbai, iname, ival)
-    // MUTECT2(
-    //     ch_m2.map { meta, tbam, tbai, _n, _ni, iname, ival -> tuple(meta, tbam, tbai, iname, ival) },
-    //     ch_m2.map { _m, _t, _ti, nbam, _ni, _in, _iv -> params.analysis == 'tumor_only' ? [] : nbam },
-    //     ch_m2.map { _m, _t, _ti, _n, nbai, _in, _iv -> params.analysis == 'tumor_only' ? [] : nbai },
-    //     ref_fasta, ref_fai, ref_dict,
-    //     panel_of_normals, panel_of_normals_tbi, germline_resource, germline_resource_tbi
-    // )
-
-    // GROUPING: key on scalar sample_id
+    // GROUPING: key on scalar sample_id. Shard lists sorted by name so the gather
+    // task's input hash does not depend on shard completion order (-resume).
     ch_mutect_chunks = MUTECT2.out.vcf_chunk
         .map { meta, _iname, vcf, tbi, stats -> tuple(meta.sample_id, meta, vcf, tbi, stats) }
         .groupTuple(by: 0)
-        .map { _sid, metas, vcfs, tbis, stats -> tuple(metas[0], vcfs, tbis, stats) }
+        .map { _sid, metas, vcfs, tbis, stats ->
+            tuple(metas[0], vcfs.sort { v -> v.name }, tbis.sort { t -> t.name }, stats.sort { s -> s.name })
+        }
 
     // -- Orientation-bias model (FFPE) - gather per-sample f1r2, learn priors -
     if (params.orientation_bias) {
         ch_orient_input = MUTECT2.out.f1r2
             .map { meta, _iname, f -> tuple(meta.sample_id, meta, f) }
             .groupTuple(by: 0)
-            .map { _sid, metas, fs -> tuple(metas[0], fs) }
+            .map { _sid, metas, fs -> tuple(metas[0], fs.sort { f -> f.name }) }
         LEARN_READ_ORIENTATION_MODEL(ch_orient_input)
         ch_ob_priors = LEARN_READ_ORIENTATION_MODEL.out.priors.map { meta, p -> tuple(meta.sample_id, p) }
     } else {
@@ -749,43 +812,18 @@ workflow SOMATIC_BLOCK {
 
         CALCULATE_CONTAMINATION(ch_contam_input)
 
-    //  Change later when implementing modified CALCULATE_CONTAMINATION
-    //         if (params.analysis == 'tumor_only') {
-    //     // no matched-normal pileup - tumor pileup only, [] for normal
-    //     CALCULATE_CONTAMINATION(
-    //         ch_pile_t.map { meta, _label, t_tbl -> tuple(meta, t_tbl) },
-    //         ch_pile_t.map { _m, _l, _t -> [] }
-    //     )
-    // } else {
-    //     // paired - your existing tumor+normal pileup join, then pass them as two inputs
-    //     ch_contam_pair = ch_pile_t.map { m, _l, t -> tuple(m.sample_id, m, t) }
-    //         .join( ch_pile_n.map { m, _l, n -> tuple(m.sample_id, n) }, by: 0 )
-    //         .map { _sid, meta, t_tbl, n_tbl -> tuple(meta, t_tbl, n_tbl) }
-    //     CALCULATE_CONTAMINATION(
-    //         ch_contam_pair.map { meta, t_tbl, _n -> tuple(meta, t_tbl) },
-    //         ch_contam_pair.map { _m, _t, n_tbl -> n_tbl }
-    //     )
-    // }
-
         ch_contam = CALCULATE_CONTAMINATION.out.contamination
             .map { meta, c, seg -> tuple(meta.sample_id, c, seg) }
         ch_contam_report = CALCULATE_CONTAMINATION.out.contamination
-            .map { meta, c, _seg -> tuple(meta.patient_id, c) }
+            .map { meta, c, _seg -> tuple(meta.sample_id, c) }
     } else {
         ch_contam = channel.empty()
         ch_contam_report = channel.empty()
     }
 
     // -- Join chunks + (optional) contamination + (optional) ob-priors -------
-    //   Collapsed from four explicit feature-combination branches into one
-    //   path. Semantics preserved EXACTLY:
-    //     - feature ON  - inner-join the optional channel (samples missing
-    //       from it are dropped, identical to the original .join without
-    //       remainder);
-    //     - feature OFF - inject [] placeholders for every backbone sample
-    //       (identical to the original channel.value([]) the off-branches
-    //       passed). c/seg/p are all derived from one channel in lockstep,
-    //       so per-sample pairing cannot cross between samples.
+    //   feature on: inner join on the optional channel; feature off: [] placeholders.
+    //   c/seg/p come from one channel, so samples cannot cross-pair.
     ch_merge_keyed = ch_mutect_chunks.map { meta, v, t, s -> tuple(meta.sample_id, meta, v, t, s) }
 
     ch_with_contam = params.pileup_variants
@@ -816,7 +854,7 @@ workflow SOMATIC_BLOCK {
 
         ch_cons_m2 = MERGE_MUTECT2.out.vcf
             .map { meta, v, t -> tuple(meta.sample_id, meta, v, t) }
-        
+
         ch_cons_strelka = (params.use_strelka2_in_consensus)
             ? TAG_STRELKA_AF.out.vcf.map { meta, s, st, i, it -> tuple(meta.sample_id, s, st, i, it) }
             : channel.empty()
@@ -899,47 +937,75 @@ workflow SOMATIC_BLOCK {
             ch_sequenza_gc_wiggle
         )
         ch_sequenza = SEQUENZA.out.sequenza
-    } 
+    }
+    // CNVkit call: purity-rescaled (-m clonal) with Sequenza cellularity when available.
+    // ch_sequenza is empty when Sequenza did not run.
+    ch_seq_confints = ch_sequenza.map { row -> tuple(row[0].sample_id, row[2]) }
+    CNVKIT_CALL(
+        CNVKIT.out.cnv
+            .map { meta, cns, cnr -> tuple(meta.sample_id, meta, cns, cnr) }
+            .join(ch_seq_confints, by: 0, remainder: true)
+            .filter { row -> row[1] instanceof Map }   // drop Sequenza-only rows (CNVkit missing)
+            .map { row -> tuple(row[1], row[2], (row.size() > 4 && row[4]) ? row[4] : []) }
+    )
+    // (meta, cns, cnr, call.cns) - same shape the report consumed before
+    ch_cnv_out = CNVKIT.out.cnv
+        .map { meta, cns, cnr -> tuple(meta.sample_id, meta, cns, cnr) }
+        .join(CNVKIT_CALL.out.call_cns.map { meta, call -> tuple(meta.sample_id, call) }, by: 0)
+        .map { _sid, meta, cns, cnr, call -> tuple(meta, cns, cnr, call) }
+
     ch_gene_loh = channel.empty()
     if (params.sequenza_gc_wiggle && params.gene_bed) {
         SEQUENZA_GENE_LOH( SEQUENZA.out.sequenza.map { row -> tuple(row[0], row[1], row[2]) }, ch_gene_bed,
                            toOptionalFileChannel(params.arm_bed) )
         ch_gene_loh = SEQUENZA_GENE_LOH.out.gene_loh
-    }
-    else {
+    } else if (!params.sequenza_gc_wiggle) {
         log.info "SEQUENZA (LOH/purity) skipped (params.sequenza_gc_wiggle not set)."
+    } else {
+        log.info "SEQUENZA gene-level LOH skipped (params.gene_bed not set); segment-level Sequenza still runs."
     }
 
-    // MSI
-    MSISENSOR_PRO(
-        ch_paired.map { meta, t_bam, t_bai, _n, _ni -> tuple(meta, t_bam, t_bai) },
-        ch_paired.map { _m, _t, _ti, n_bam, _ni     -> n_bam },
-        ch_paired.map { _m, _t, _ti, _n, n_bai      -> n_bai },
-        ch_msisensor_list,
-        ch_interval_bed
-    )
+    // MSI - needs the pre-scanned site list; without it msisensor-pro would fail on '-d '
+    // and stop the whole run, so the step is skipped instead (main.nf warns).
+    ch_msi        = channel.empty()
+    ch_msi_report = channel.empty()
+    if (params.msisensor_list) {
+        MSISENSOR_PRO(
+            ch_paired.map { meta, t_bam, t_bai, _n, _ni -> tuple(meta, t_bam, t_bai) },
+            ch_paired.map { _m, _t, _ti, n_bam, _ni     -> n_bam },
+            ch_paired.map { _m, _t, _ti, _n, n_bai      -> n_bai },
+            ch_msisensor_list,
+            ch_interval_bed
+        )
+        ch_msi = MSISENSOR_PRO.out.msi
 
-    if (params.gene_bed) {
-        ch_msi_somatic = MSISENSOR_PRO.out.msi
-            .map    { meta, files -> tuple(meta, files.find { it.name.endsWith('_somatic') }) }
-            .filter { _m, f -> f != null }                 // no _somatic (tumor-only) - skip
-        MSISENSOR_GENE_MAP(ch_msi_somatic, ch_gene_bed)
-    }
+        if (params.gene_bed) {
+            ch_msi_somatic = MSISENSOR_PRO.out.msi
+                .map    { meta, msi_files ->
+                    def fl = (msi_files instanceof List) ? msi_files : [msi_files]
+                    // paired mode lists the unstable sites in <prefix>_unstable (MSIsensor-pro 1.x;
+                    // <prefix>_somatic in older releases)
+                    tuple(meta, fl.find { f -> f.name.endsWith('_unstable') } ?: fl.find { f -> f.name.endsWith('_somatic') })
+                }
+                .filter { _m, f -> f != null }                 // no per-site table (tumor-only) - skip
+            MSISENSOR_GENE_MAP(ch_msi_somatic, ch_gene_bed)
+        }
 
-    // The patient report shows the CLASSIFIED status (cutoff + minimum sites) when available.
-    ch_msi_report = MSISENSOR_PRO.out.msi
-    if (params.classify_msi) {
-        CLASSIFY_MSI(MSISENSOR_PRO.out.msi)
-        ch_msi_report = CLASSIFY_MSI.out.status
+        // The patient report shows the CLASSIFIED status (cutoff + minimum sites) when available.
+        ch_msi_report = MSISENSOR_PRO.out.msi
+        if (params.classify_msi) {
+            CLASSIFY_MSI(MSISENSOR_PRO.out.msi)
+            ch_msi_report = CLASSIFY_MSI.out.status
+        }
     }
 
     emit:
     snv_vcf  = ch_final_snv_vcf
     sv_vcf   = MANTA.out.sv_vcf
-    cnv      = CNVKIT.out.cnv
+    cnv      = ch_cnv_out
     loh      = ch_sequenza
     gene_loh = ch_gene_loh
-    msi      = MSISENSOR_PRO.out.msi
+    msi      = ch_msi
     msi_report    = ch_msi_report
     contamination = ch_contam_report
 }
@@ -957,15 +1023,19 @@ workflow SOMATIC_REPORT_BLOCK {
     ch_msi              // SOMATIC_BLOCK.out.msi
     ch_tmb              // COMPUTE_TMB.out.tmb
     ch_annotsv_dir      // AnnotSV DB dir (or [] when disabled)
-    ch_contam           // SOMATIC_BLOCK.out.contamination (patient_id, table) or empty
+    ch_contam           // SOMATIC_BLOCK.out.contamination (sample_id, table) or empty
 
     main:
+    // Key = tumour sample_id. Report name = patient_id for the classic <patient>_T tumour
+    // (unchanged file names), the sample_id when the samplesheet 'sample' column is used.
     ch_rep_class = ch_classification
-        .map { meta, tsv -> tuple(meta.patient_id, meta.sample_id, (meta.sex ?: 'NA').toString(), tsv) }
+        .map { meta, tsv ->
+            def report_id = (meta.sample_id == "${meta.patient_id}_T") ? meta.patient_id : meta.sample_id
+            tuple(meta.sample_id, report_id, (meta.sex ?: 'NA').toString(), tsv) }
     ch_rep_cnv = ch_cnv
-        .map { meta, _mk, _mkr, callcns -> tuple(meta.patient_id, callcns) }
+        .map { meta, _mk, _mkr, callcns -> tuple(meta.sample_id, callcns) }
     ch_rep_loh = ch_loh
-        .map { row -> tuple(row[0].patient_id, row[1]) }
+        .map { row -> tuple(row[0].sample_id, row[1]) }
 
     ch_rep_sv = channel.empty()
     if (params.annotsv_dir) {
@@ -974,7 +1044,7 @@ workflow SOMATIC_REPORT_BLOCK {
             ch_annotsv_dir
         )
         ch_rep_sv = ANNOTATE_SV_SOMATIC.out.annotated_sv
-            .map { meta, _tag, tsv -> tuple(meta.patient_id, tsv) }
+            .map { meta, _tag, tsv -> tuple(meta.sample_id, tsv) }
     }
 
     ch_rep_msi = ch_msi
@@ -983,10 +1053,10 @@ workflow SOMATIC_REPORT_BLOCK {
             def files = (msi instanceof List) ? msi : [msi]
             def main  = files.find { f -> f.name == "${meta.sample_id}_msi_status.txt" } ?:
                         files.find { f -> f.name == "${meta.sample_id}_msi" } ?: files[0]
-            tuple(meta.patient_id, main)
+            tuple(meta.sample_id, main)
         }
     ch_rep_tmb = ch_tmb
-        .map { meta, tmb -> tuple(meta.patient_id, tmb) }
+        .map { meta, tmb -> tuple(meta.sample_id, tmb) }
 
     ch_report_in = ch_rep_class
         .join(ch_rep_cnv, by: 0, remainder: true)
@@ -996,9 +1066,10 @@ workflow SOMATIC_REPORT_BLOCK {
         .join(ch_rep_tmb, by: 0, remainder: true)
         .join(ch_contam, by: 0, remainder: true)
         .map { row ->
-            // (pid, sid, sex, cls, cnv, loh, sv, msi, tmb, contamination)
-            def pid = row[0]
-            def sid = row.size() > 1 ? (row[1] ?: 'NA') : 'NA'
+            // key row: (sid, report_id, sex, cls, cnv, loh, sv, msi, tmb, contamination)
+            // emitted:  (report_id, sid, sex, ...) - process input order unchanged
+            def sid = row[0]
+            def pid = row.size() > 1 ? (row[1] ?: sid) : sid
             def sex = row.size() > 2 ? (row[2] ?: 'NA') : 'NA'
             def cls = row.size() > 3 ? (row[3] ?: []) : []
             def cnv = row.size() > 4 ? (row[4] ?: []) : []
@@ -1038,18 +1109,26 @@ workflow GERMLINE_REPORT_BLOCK {
     ch_report_genes // params.germline_report_genes or []
 
     main:
-    // -- Annotate SV (Manta diploidSV) -------------------------
-    ch_sv_in = ch_sv_vcf.map { meta, vcf, tbi -> tuple(meta, 'manta', vcf, tbi) }
-    ANNOTATE_SV_MANTA(ch_sv_in, ch_annotsv_dir)
+    // SV/CNV annotation needs the AnnotSV DB; without it those report sections are
+    // empty placeholders and the SNV / LoF / ROH sections are still produced.
+    ch_r_sv  = channel.empty()
+    ch_r_cnv = channel.empty()
+    if (params.annotsv_dir) {
+        // -- Annotate SV (Manta diploidSV) -------------------------
+        ch_sv_in = ch_sv_vcf.map { meta, vcf, tbi -> tuple(meta, 'manta', vcf, tbi) }
+        ANNOTATE_SV_MANTA(ch_sv_in, ch_annotsv_dir)
+        ch_r_sv  = ANNOTATE_SV_MANTA.out.annotated_sv.map { meta, _s, tsv -> tuple(meta.sample_id, tsv) }
 
-    // -- Annotate CNV (gCNV segments - the 2nd VCF pair) -------
-    ch_cnv_in = ch_cnv_vcf.map { meta, _iv, _ivt, seg, segt -> tuple(meta, 'gcnv', seg, segt) }
-    ANNOTATE_SV_GCNV(ch_cnv_in, ch_annotsv_dir)
+        // -- Annotate CNV (gCNV segments - the 2nd VCF pair) -------
+        ch_cnv_in = ch_cnv_vcf.map { meta, _iv, _ivt, seg, segt -> tuple(meta, 'gcnv', seg, segt) }
+        ANNOTATE_SV_GCNV(ch_cnv_in, ch_annotsv_dir)
+        ch_r_cnv = ANNOTATE_SV_GCNV.out.annotated_sv.map  { meta, _s, tsv -> tuple(meta.sample_id, tsv) }
+    } else {
+        log.info "Germline report: SV/CNV sections empty (params.annotsv_dir not set)."
+    }
 
     // -- Assemble per-sample report inputs (key = sample_id) ---
     ch_r_snv = ch_snv_vcf.map { meta, vcf, tbi -> tuple(meta.sample_id, vcf, tbi) }
-    ch_r_sv  = ANNOTATE_SV_MANTA.out.annotated_sv.map { meta, _s, tsv -> tuple(meta.sample_id, tsv) }
-    ch_r_cnv = ANNOTATE_SV_GCNV.out.annotated_sv.map  { meta, _s, tsv -> tuple(meta.sample_id, tsv) }
     ch_r_roh = ch_roh.map { meta, txt -> tuple(meta.sample_id, txt) }
 
     // SNV backbone (always present); left-join optional SV/CNV/ROH.
@@ -1102,15 +1181,25 @@ workflow DNA_WORKFLOW {
     // ch_ref_fasta) into the SAME work dir as the index, causing a Nextflow
     // "input file name collision". The sidecar suffixes are tool-defined and
     // fixed; the .fa/.fai/.dict are naturally excluded by this allowlist.
+    // files() always returns a list (file() returns a bare Path when exactly one entry
+    // matches, and a Path iterates over its name components).
     def bwamem2_suffixes = ['.0123', '.amb', '.ann', '.bwt.2bit.64', '.pac']
-    ch_ref_index = channel.value(
-        file("${params.ref_index_dir}/*").findAll { f ->
-            f.exists() && bwamem2_suffixes.any { suf -> f.name.endsWith(suf) }
-        }
-    )
+    def ref_index_files  = params.ref_index_dir
+        ? files("${params.ref_index_dir}/*").findAll { f -> bwamem2_suffixes.any { suf -> f.name.endsWith(suf) } }
+        : []
+    // bwa-mem2 runs in mapping (all modes) and in umi_consensus re-alignment (markdup stage).
+    if (stageRuns('mapping') || (stageRuns('markdup') && params.dedup_mode == 'umi_consensus')) {
+        def missing_idx = bwamem2_suffixes.findAll { suf -> !ref_index_files.any { f -> f.name.endsWith(suf) } }
+        if (missing_idx)
+            error "ERROR: bwa-mem2 index incomplete in params.ref_index_dir='${params.ref_index_dir}': " +
+                  "no file ending in ${missing_idx.join(', ')}"
+    }
+    ch_ref_index = channel.value(ref_index_files)
 
-    ch_dbsnp            = toFileChannel(params.dbsnp)
-    ch_dbsnp_tbi        = toFileChannel("${params.dbsnp}.tbi")
+    // dbSNP is optional at channel level; main.nf requires it where it is consumed
+    // (HaplotypeCaller, BQSR, MuSE sump).
+    ch_dbsnp            = toOptionalFileChannel(params.dbsnp)
+    ch_dbsnp_tbi        = params.dbsnp ? toFileChannel("${params.dbsnp}.tbi") : channel.value([])
     ch_mills            = params.mills        ? toFileChannel(params.mills)               : channel.value([])
     ch_mills_tbi        = params.mills        ? toFileChannel("${params.mills}.tbi")      : channel.value([])
     ch_known_indels     = params.known_indels ? toFileChannel(params.known_indels)        : channel.value([])
@@ -1121,7 +1210,9 @@ workflow DNA_WORKFLOW {
     ch_bait_interval_list   = toOptionalFileChannel(params.bait_interval_list)
     ch_target_interval_list = toOptionalFileChannel(params.target_interval_list)
 
-    ch_scatter_intervals = channel.fromPath("${params.scatter_intervals}/*", checkIfExists: true)
+    // Interval shards only: any other file in the folder (checksums, logs, README) would
+    // otherwise become an extra Mutect2/HaplotypeCaller/VarScan shard and fail it.
+    ch_scatter_intervals = channel.fromPath("${params.scatter_intervals}/*.{interval_list,bed}", checkIfExists: true)
         .flatten().map { f -> tuple(f.baseName, f) }
 
     ch_germline_resource     = toOptionalFileChannel(params.germline_resource)
@@ -1140,7 +1231,7 @@ workflow DNA_WORKFLOW {
 
     ch_preprocessed_intervals = toOptionalFileChannel(params.preprocessed_intervals)
     ch_contig_ploidy_priors   = toOptionalFileChannel(params.contig_ploidy_priors)
-    ch_gcnv_scatter_intervals = params.gcnv_scatter_intervals ? channel.fromPath("${params.gcnv_scatter_intervals}/*", checkIfExists: true)
+    ch_gcnv_scatter_intervals = params.gcnv_scatter_intervals ? channel.fromPath("${params.gcnv_scatter_intervals}/*.{interval_list,bed}", checkIfExists: true)
         .flatten().map { f -> tuple(f.baseName, f) } : channel.empty()
     ch_gcnv_annotated_intervals = toOptionalFileChannel(params.gcnv_annotated_intervals)
 
@@ -1158,6 +1249,7 @@ workflow DNA_WORKFLOW {
     ch_gene_bed            = toOptionalFileChannel(params.gene_bed)
 
     ch_somalier_sites      = toOptionalFileChannel(params.somalier_sites)
+    ch_evidence_bed    = toOptionalFileChannel(params.evidence_bed)
 
     ch_vep_cache_dir   = params.vep_cache_dir   ? channel.value(file(params.vep_cache_dir,   checkIfExists: true)) : channel.value([])
     ch_vep_plugins_dir = params.vep_plugins_dir ? channel.value(file(params.vep_plugins_dir, checkIfExists: true)) : channel.value([])
@@ -1166,6 +1258,8 @@ workflow DNA_WORKFLOW {
     ch_clinvar_tbi     = params.clinvar_vcf ? toFileChannel("${params.clinvar_vcf}.tbi") : channel.value([])
     ch_cosmic          = toOptionalFileChannel(params.cosmic_vcf)
     ch_cosmic_tbi      = params.cosmic_vcf ? toFileChannel("${params.cosmic_vcf}.tbi") : channel.value([])
+    ch_gnomad_faf      = toOptionalFileChannel(params.gnomad_faf_vcf)
+    ch_gnomad_faf_tbi  = params.gnomad_faf_vcf ? toFileChannel("${params.gnomad_faf_vcf}.tbi") : channel.value([])
 
     // -- Germline Phase 1/2: ROH AF-file (optional) + AnnotSV DB dir --
     ch_roh_af_file     = toOptionalFileChannel(params.roh_af_file)
@@ -1189,7 +1283,7 @@ workflow DNA_WORKFLOW {
     // -- Reference preflight (build / contig naming), in parallel with mapping --
     if (params.preflight_references) {
         def pf_vcfs = ['dbsnp', 'mills', 'known_indels', 'germline_resource', 'panel_of_normals',
-                       'pileup_variants', 'clinvar_vcf', 'cosmic_vcf', 'somalier_sites']
+                       'pileup_variants', 'clinvar_vcf', 'cosmic_vcf', 'gnomad_faf_vcf', 'somalier_sites']
                       .findAll { k -> params[k] }.collect { k -> file(params[k], checkIfExists: true) }
         def pf_beds = (params.assay == 'wes' ? ['interval_bed', 'call_regions_gz'] : [])
                       .findAll { k -> params[k] }.collect { k -> file(params[k], checkIfExists: true) }
@@ -1203,10 +1297,17 @@ workflow DNA_WORKFLOW {
     // All rows (lanes/chunks) of one sample must agree on sample-level fields; otherwise
     // grouping splits the sample and its outputs are produced (and published) twice.
     ch_manifest
-        .map { meta, _reads -> tuple(meta.sample_id, [sex: meta.sex, batch: meta.batch]) }
+        .map { meta, _reads -> tuple(meta.sample_id, [patient: meta.patient_id, sex: meta.sex, batch: meta.batch, type: meta.type]) }
         .unique()
         .groupTuple()
-        .map { sid, vals -> if (vals.size() > 1) error "Samplesheet rows of ${sid} disagree on sex/batch: ${vals} - every row (lane/chunk) of one sample needs the same sex and batch value"; sid }
+        .map { sid, vals -> if (vals.size() > 1) error "Samplesheet rows of ${sid} disagree on patient/sex/batch/sample_type: ${vals} - every row (lane/chunk) of one sample needs the same values (two different samples need different 'sample' labels)"; sid }
+
+    // Read-group IDs (<sample>_L<lane>_C<chunk>) must be unique: two rows with the same lane
+    // and chunk would give two read groups one ID, and duplicate marking/BQSR would merge them.
+    ch_manifest
+        .map { meta, _reads -> tuple(meta.uid, 1) }
+        .groupTuple()
+        .map { uid, n -> if (n.size() > 1) error "Samplesheet has ${n.size()} rows for read group ${uid} (same sample, lane_num and chunk); give each FASTQ pair its own lane_num/chunk"; uid }
 
     def umi_mode = (params.dedup_mode in ['umi_consensus', 'umi_markdup'])
 
@@ -1216,10 +1317,29 @@ workflow DNA_WORKFLOW {
         .map { meta, _reads -> stripChunkMeta(meta) }
         .unique { m -> m.sample_id }
 
+    // Somatic pairing needs exactly one normal per patient (tumours may be several).
+    ch_samples
+        .filter { m -> params.analysis == 'somatic' && m.type == 'DN' }
+        .map    { m -> tuple(m.patient_id, m.sample_id) }
+        .groupTuple()
+        .map    { pid, ids -> if (ids.size() > 1) error "Patient ${pid} has ${ids.size()} normal (DN) samples ${ids}; tumour-normal pairing needs exactly one"; pid }
+
     // VCF re-entry (annotation/classification): only samples that have a
     // callset in this analysis - tumors (somatic) or normals (germline).
+    // Somatic tumours carry normal_id (the matched normal's SM) for VCF2MAF on cold start.
     def vcf_type = (params.analysis == 'germline') ? 'DN' : 'DT'
-    ch_vcf_samples = ch_samples.filter { m -> m.type == vcf_type }
+    // A tumour listed without its normal keeps the classic '<patient>_N' name (the normal
+    // column name in its VCF) instead of being dropped from re-entry.
+    ch_normal_ids = ch_samples
+        .filter { m -> m.type == 'DN' }
+        .map    { m -> [m.patient_id, m.sample_id] }
+        .toList()
+        .map    { pairs -> pairs.collectEntries { pr -> [(pr[0]): pr[1]] } }
+    ch_vcf_samples = (vcf_type == 'DT')
+        ? ch_samples.filter { m -> m.type == 'DT' }
+            .combine(ch_normal_ids)
+            .map { m, nmap -> m + [normal_id: nmap[m.patient_id] ?: "${m.patient_id}_N".toString()] }
+        : ch_samples.filter { m -> m.type == vcf_type }
 
     if (params.write_manifest) {
         // One row per sample (input file is the first read / BAM), then consolidate.
@@ -1229,10 +1349,13 @@ workflow DNA_WORKFLOW {
             tuple(meta, f)
         }
         MANIFEST_ROW(ch_manifest_input)
-        WRITE_MANIFEST(MANIFEST_ROW.out.row.collect())
+        WRITE_MANIFEST(MANIFEST_ROW.out.row.collect(sort: true))
     }
 
     // -- Entry-point routing (keyed on the stage name = params.start_at) ------
+    // Stage-2 BAM name follows dedup_mode (umi_consensus writes <sid>_consensus.bam);
+    // variant_calling re-entry reads <sid>_bqsr.bam only when bqsr=true.
+    def dedup_sfx = (params.dedup_mode == 'umi_consensus') ? 'consensus' : 'markdup'
     if (params.start_at == 'mapping') {
         ch_alignment_inputs = ch_manifest
     }
@@ -1249,19 +1372,20 @@ workflow DNA_WORKFLOW {
     else if (params.start_at in ['metrics', 'bqsr']) {
         ch_active_bam = ch_samples.map { meta ->
             def cram = file("${params.input_bam_dir}/${meta.sample_id}.cram")
-            def bam  = file("${params.input_bam_dir}/${meta.sample_id}_markdup.bam")
+            def bam  = file("${params.input_bam_dir}/${meta.sample_id}_${dedup_sfx}.bam")
             def final_bam = cram.exists() ? cram : bam
             def final_idx = cram.exists()
                 ? file("${params.input_bam_dir}/${meta.sample_id}.cram.crai",       checkIfExists: true)
-                : file("${params.input_bam_dir}/${meta.sample_id}_markdup.bai", checkIfExists: true)
+                : file("${params.input_bam_dir}/${meta.sample_id}_${dedup_sfx}.bai", checkIfExists: true)
             return tuple(meta, final_bam, final_idx)
         }
     }
     else if (params.start_at == 'variant_calling') {
+        def vc_sfx = params.bqsr ? 'bqsr' : dedup_sfx
         ch_active_bam = ch_samples.map { meta ->
             tuple(meta,
-                file("${params.input_bam_dir}/${meta.sample_id}_bqsr.bam", checkIfExists: true),
-                file("${params.input_bam_dir}/${meta.sample_id}_bqsr.bai", checkIfExists: true))
+                file("${params.input_bam_dir}/${meta.sample_id}_${vc_sfx}.bam", checkIfExists: true),
+                file("${params.input_bam_dir}/${meta.sample_id}_${vc_sfx}.bai", checkIfExists: true))
         }
     }
     else if (params.start_at == 'annotation') {
@@ -1282,7 +1406,7 @@ workflow DNA_WORKFLOW {
         }
     }
 
-    // -- STAGE 1: align (+ UMI extraction if a umi_* dedup_mode) ---
+    // -- STAGE 1 mapping: alignment (UMI extraction in the umi_* modes)
     //   dedup_mode == 'markdup'     - fastp(+5bp front-trim) | bwa-mem2 | fixmate
     //   dedup_mode == 'umi_*'       - fgbio FastqToBam (3M2S+T) - bwa-mem2 - ZipperBams
 
@@ -1293,7 +1417,7 @@ workflow DNA_WORKFLOW {
         } else {
             PREPROCESS_AND_ALIGN_DNA(ch_alignment_inputs, ch_ref_fasta, ch_ref_index)
             PREPROCESS_AND_ALIGN_DNA.out.json_report
-                .collect()
+                .collect(sort: true)
                 .map { files -> tuple("01_trimming", files) }
                 | MULTIQC_TRIMMING
             ch_chunk_bams = PREPROCESS_AND_ALIGN_DNA.out.chunk_bams
@@ -1301,13 +1425,15 @@ workflow DNA_WORKFLOW {
 
         // GROUPING: key on scalar sample_id, carry meta as payload,
         // keep first meta (all sample-level fields identical per sample).
+        // Chunk order sorted by name: groupTuple emits in task-completion order, which
+        // would change the merge task's input hash between runs and defeat -resume.
         ch_active_bam = ch_chunk_bams
             .map { meta, bam -> tuple(meta.sample_id, stripChunkMeta(meta), bam) }
             .groupTuple(by: 0)
-            .map { _sid, metas, bams -> tuple(metas[0], bams) }
+            .map { _sid, metas, bams -> tuple(metas[0], bams.sort { b -> b.name }) }
     }
 
-    // -- STAGE 2: dedup (mode-dependent) + CRAM --------------------
+    // -- STAGE 2 markdup: duplicate marking or UMI consensus, CRAM --
     if (stageRuns('markdup')) {
         if (params.dedup_mode == 'umi_consensus') {
             MERGE_AND_CONSENSUS(ch_active_bam, ch_ref_fasta, ch_ref_fai, ch_ref_dict, ch_ref_index)
@@ -1327,7 +1453,7 @@ workflow DNA_WORKFLOW {
         }
 
         ch_dedup_metrics
-            .collect()
+            .collect(sort: true)
             .map { files -> tuple(ch_dedup_label, files) }
             | MULTIQC_MARKDUP
 
@@ -1339,7 +1465,8 @@ workflow DNA_WORKFLOW {
         ch_active_bam = ch_dedup_bam
     }
 
-    // -- STAGE 3: QC -------------------------------------------
+    // -- STAGE 3 metrics: QC ----------------------------------------
+    ch_depth_quantized = channel.empty()
     if (stageRuns('metrics')) {
         QC_BLOCK(
             ch_active_bam,
@@ -1347,15 +1474,27 @@ workflow DNA_WORKFLOW {
             ch_interval_bed, ch_bait_interval_list, ch_target_interval_list, ch_verifybamid_db,
             toOptionalFileChannel(params.coverage_report_bed)
         )
+        ch_depth_quantized = QC_BLOCK.out.depth_quantized
         if (params.somalier_sites) {
             SOMALIER_EXTRACT(ch_active_bam, ch_ref_fasta, ch_ref_fai, ch_somalier_sites)
-            SOMALIER_RELATE(SOMALIER_EXTRACT.out.counts.collect())
+            SOMALIER_RELATE(SOMALIER_EXTRACT.out.counts.collect(sort: true))
 
             CHECK_SAMPLE_SWAPS(SOMALIER_RELATE.out.pairs)
 
+            ch_ancestry = channel.empty()
+            if (params.somalier_ancestry_labels && params.somalier_1kg_dir) {
+                SOMALIER_ANCESTRY(
+                    SOMALIER_EXTRACT.out.counts_meta.filter { m, _f -> m.type == 'DN' }.map { _m, f -> f }.collect(sort: true),
+                    toFileChannel(params.somalier_ancestry_labels),
+                    toFileChannel(params.somalier_1kg_dir)
+                )
+                ch_ancestry = SOMALIER_ANCESTRY.out.ancestry
+            }
+
             SOMALIER_RELATE.out.pairs
                 .mix(SOMALIER_RELATE.out.samples)
-                .collect()
+                .mix(ch_ancestry)
+                .collect(sort: true)
                 .map { files -> tuple("03_somalier", files) }
                 | MULTIQC_SOMALIER
         } else {
@@ -1363,7 +1502,7 @@ workflow DNA_WORKFLOW {
         }
     }
 
-    // -- STAGE 4: BQSR (optional) ------------------------------
+    // -- STAGE 4 bqsr: base recalibration (bqsr: true) --------------
     if (stageRuns('bqsr')) {
         if (params.bqsr) {
             RUN_BQSR(
@@ -1372,7 +1511,8 @@ workflow DNA_WORKFLOW {
                 ch_dbsnp, ch_dbsnp_tbi,
                 ch_mills, ch_mills_tbi,
                 ch_known_indels, ch_known_indels_tbi,
-                ch_interval_bed
+                ch_interval_bed,
+                ch_scatter_intervals
             )
             ch_active_bam = RUN_BQSR.out.bam_bai_pair
             if (params.make_cram) {
@@ -1383,13 +1523,16 @@ workflow DNA_WORKFLOW {
         }
     }
 
-    // -- STAGE 5: variant calling ------------------------------
+    // -- STAGE 5 variant_calling ------------------------------------
     // Somatic runs also call the matched normals' germline (FH, SMARCB1, VHL,
     // FLCN, BAP1, TSC1/2, SDHx, HBB ...) unless germline_on_normals=false.
     def germline_on_normals = (params.analysis == 'somatic' && params.germline_on_normals)
     ch_germline_vcf = channel.empty()
 
     if (stageRuns('variant_calling')) {
+        if (params.evidence_bed) {
+            EVIDENCE_BAM(ch_active_bam, ch_evidence_bed, ch_ref_fasta, ch_ref_fai)
+        }
 
         if (params.analysis == 'germline' || germline_on_normals) {
 
@@ -1397,7 +1540,7 @@ workflow DNA_WORKFLOW {
                 ch_active_bam,
                 ch_ref_fasta, ch_ref_fai, ch_ref_dict,
                 ch_dbsnp, ch_dbsnp_tbi,
-                ch_interval_bed, 
+                ch_interval_bed,
                 //ch_interval_list,
                 ch_call_regions_gz, ch_call_regions_tbi,
                 ch_scatter_intervals,
@@ -1439,13 +1582,13 @@ workflow DNA_WORKFLOW {
             if (germline_on_normals) ch_germline_vcf = GERMLINE_BLOCK.out.snv_vcf
 
         } else if (params.analysis == 'tumor_only') {
-            error "Tumor-only workflow not yet implemented. Coming in v6.1"
+            error "analysis = tumor_only is not implemented; use analysis = somatic with a matched normal"
         } else {
             error "ERROR: params.analysis must be 'germline', 'somatic', or 'tumor_only'. Got: ${params.analysis}"
         }
     }
 
-    // -- STAGE 6: annotation -----------------------------------
+    // -- STAGE 6 annotation -----------------------------------------
     if (stageRuns('annotation')) {
 
         ANNOTATE_VCF(
@@ -1454,7 +1597,8 @@ workflow DNA_WORKFLOW {
             ch_ref_fasta, ch_ref_fai,
             ch_vep_plugins_dir,
             ch_clinvar, ch_clinvar_tbi,
-            ch_cosmic, ch_cosmic_tbi
+            ch_cosmic, ch_cosmic_tbi,
+            ch_gnomad_faf, ch_gnomad_faf_tbi
         )
 
         // Normals' germline calls from a somatic run (same VEP config, no COSMIC).
@@ -1465,28 +1609,42 @@ workflow DNA_WORKFLOW {
                 ch_ref_fasta, ch_ref_fai,
                 ch_vep_plugins_dir,
                 ch_clinvar, ch_clinvar_tbi,
-                channel.value([]), channel.value([])
+                channel.value([]), channel.value([]),
+                ch_gnomad_faf, ch_gnomad_faf_tbi
             )
         }
 
         // TMB from the VEP-annotated calls (needs consequence annotations).
         if (params.compute_tmb && params.analysis == 'somatic') {
+            // Callable territory from the tumour and normal depth classes when the metrics
+            // stage ran in this run; otherwise the BED territory alone (re-entry runs).
+            // combine (not join) on the normal: several tumours can share one normal.
+            ch_tmb_vcf = ANNOTATE_VCF.out.annotated_vcf.map { meta, vcf, tbi, _html -> tuple(meta, vcf, tbi) }
+            if (stageRuns('metrics')) {
+                ch_depth   = ch_depth_quantized.map { meta, q -> tuple(meta.sample_id, q) }
+                ch_tmb_vcf = ch_tmb_vcf
+                    .map     { meta, vcf, tbi -> tuple(meta.sample_id, meta, vcf, tbi) }
+                    .join    (ch_depth, by: 0)
+                    .map     { _sid, meta, vcf, tbi, tq -> tuple(meta.normal_id, meta, vcf, tbi, tq) }
+                    .combine (ch_depth, by: 0)
+                    .map     { _nid, meta, vcf, tbi, tq, nq -> tuple(meta, vcf, tbi, tq, nq) }
+            } else {
+                ch_tmb_vcf = ch_tmb_vcf.map { meta, vcf, tbi -> tuple(meta, vcf, tbi, [], []) }
+            }
             COMPUTE_TMB(
-                ANNOTATE_VCF.out.annotated_vcf.map { meta, vcf, tbi, _html ->
-                    tuple(meta, vcf, tbi)
-                },
+                ch_tmb_vcf,
                 ch_interval_bed,
                 toOptionalFileChannel(params.tmb_coding_bed)
             )
         }
         ANNOTATE_VCF.out.annotated_vcf
             .map { _meta, _vcf, _tbi, html -> html }
-            .collect()
-            .map { files -> tuple("08_annotation", files) }
+            .collect(sort: true)
+            .map { files -> tuple("06_annotation", files) }
             | MULTIQC_ANNOT
     }
 
-    // -- STAGE 7: classification + consolidated reporting ------
+    // -- STAGE 7 classification: classification and reports ---------
     if (stageRuns('classification')) {
 
         def cold_start = (start_rank == stageRankMap()['classification'])
@@ -1497,31 +1655,40 @@ workflow DNA_WORKFLOW {
         ch_annot_for_classify = cold_start
             ? ch_active_vcf
             : ANNOTATE_VCF.out.annotated_vcf.map { meta, vcf, tbi, _html -> tuple(meta, vcf, tbi) }
+        // Somatic runs with germline_on_normals: the normals' germline calls are classified
+        // (germline rules) and converted to MAF too.
+        if (germline_on_normals && !cold_start && stageRuns('annotation') && calls_this_run)
+            ch_annot_for_classify = ch_annot_for_classify.mix(
+                ANNOTATE_VCF_GERMLINE.out.annotated_vcf.map { meta, vcf, tbi, _html -> tuple(meta, vcf, tbi) })
 
         if (params.classify_variants) {
-            CLASSIFY_VARIANTS(ch_annot_for_classify, toOptionalFileChannel(params.cosmic_cgc_tsv))
-            if (params.generate_maf && params.analysis == 'somatic')
-                VCF2MAF(ch_annot_for_classify, ch_ref_fasta, ch_ref_fai)
-            if (params.generate_maf && params.analysis == 'germline')
-                VCF2MAF(ch_annot_for_classify, ch_ref_fasta, ch_ref_fai)
+            CLASSIFY_VARIANTS(ch_annot_for_classify, toOptionalFileChannel(params.cosmic_cgc_tsv),
+                              toOptionalFileChannel(params.germline_af_thresholds))
+        }
+        // MAF needs only the annotated VCF - independent of the pre-classification toggle.
+        if (params.generate_maf && params.analysis in ['somatic', 'germline']) {
+            VCF2MAF(ch_annot_for_classify, ch_ref_fasta, ch_ref_fai)
         }
 
+        // TMB is optional in the report: with compute_tmb=false the TMB section reads
+        // "(no TMB output)" instead of the whole report being dropped.
         def can_report = calls_this_run && params.consolidate_somatic_reports &&
-                         params.classify_variants && params.analysis == 'somatic' &&
-                         params.compute_tmb
+                         params.classify_variants && params.analysis == 'somatic'
         if (can_report) {
             SOMATIC_REPORT_BLOCK(
-                CLASSIFY_VARIANTS.out.classification,
+                CLASSIFY_VARIANTS.out.classification.filter { m, _t -> m.type == 'DT' },
                 SOMATIC_BLOCK.out.cnv,
                 SOMATIC_BLOCK.out.loh,
                 SOMATIC_BLOCK.out.sv_vcf,
                 SOMATIC_BLOCK.out.msi_report,
-                COMPUTE_TMB.out.tmb,
+                params.compute_tmb ? COMPUTE_TMB.out.tmb : channel.empty(),
                 ch_annotsv_dir,
                 SOMATIC_BLOCK.out.contamination
             )
         } else if (!calls_this_run && params.consolidate_somatic_reports) {
             log.info "Report skipped on cold-start; use -resume for the consolidated report."
+        } else if (params.consolidate_somatic_reports && params.analysis == 'somatic' && !params.classify_variants) {
+            log.info "Somatic consolidated report skipped (params.classify_variants = false)."
         }
 
         // -- Germline consolidated report (Phase 1) ----------------
@@ -1529,8 +1696,8 @@ workflow DNA_WORKFLOW {
         //   exactly like the somatic report. SNV source is the VEP-annotated
         //   VCF (for ClinVar/CLIN_SIG in the report's SNV section).
         def germ_report_mode = (params.analysis == 'germline' || germline_on_normals)
-        def can_germline_report = calls_this_run && params.consolidate_germline_reports &&
-                                  germ_report_mode && params.annotsv_dir
+        // AnnotSV is optional: without it only the SV/CNV sections are empty.
+        def can_germline_report = calls_this_run && params.consolidate_germline_reports && germ_report_mode
         if (can_germline_report) {
             ch_germ_snv_annot = (params.analysis == 'germline'
                     ? ANNOTATE_VCF.out.annotated_vcf
@@ -1545,11 +1712,8 @@ workflow DNA_WORKFLOW {
                 toOptionalFileChannel(params.cosmic_cgc_tsv),
                 toOptionalFileChannel(params.germline_report_genes)
             )
-        } else if (params.consolidate_germline_reports && germ_report_mode) {
-            if (!calls_this_run)
-                log.info "Germline report skipped on cold-start; use -resume for the consolidated report."
-            else if (!params.annotsv_dir)
-                log.info "Germline report skipped (params.annotsv_dir not set - AnnotSV DB required for SV/CNV annotation)."
+        } else if (params.consolidate_germline_reports && germ_report_mode && !calls_this_run) {
+            log.info "Germline report skipped on cold-start; use -resume for the consolidated report."
         }
     }
 }

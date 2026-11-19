@@ -1,4 +1,4 @@
-# GENCODE GTF -> Picard refFlat; exons written in ascending order (required by Picard, also for minus-strand genes)
+# GENCODE GTF → Picard refFlat; exons written in ascending order (required by Picard, also for minus-strand genes)
 import re, sys
 from collections import defaultdict
 gtf, out_path = sys.argv[1], sys.argv[2]

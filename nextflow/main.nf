@@ -65,6 +65,17 @@ def warnParams(List names, String reason) {
 //  Called once at the top of workflow{} (strict: no top-level run).
 // ============================================================
 def validateParams() {
+    ['germline_low_vaf', 'germline_ba1_af', 'classify_common_af'].each { k ->
+        def v = params[k]
+        if (v != null && !(v instanceof Number && v > 0 && v < 1))
+            error "params.${k} must be a number between 0 and 1 (got '${v}')"
+    }
+    if (params.germline_mosaic_min_dp != null && !(params.germline_mosaic_min_dp instanceof Integer && params.germline_mosaic_min_dp >= 1))
+        error "params.germline_mosaic_min_dp must be a whole number >= 1 (got '${params.germline_mosaic_min_dp}')"
+    if (params.germline_ba1_af != null && params.classify_common_af != null && params.germline_ba1_af < params.classify_common_af)
+        error "params.germline_ba1_af (${params.germline_ba1_af}) must be >= classify_common_af (${params.classify_common_af}) (BA1 >= BS1)"
+    if (params.classify_variants && !params.gnomad_faf_vcf)
+        log.warn "gnomad_faf_vcf not set: classification uses VEP MAX_AF (includes founder/small populations); see README Appendix A, step 7.6"
     // -- Enum validation ---------------------------------------
     if (!validDedupModes().contains(params.dedup_mode))
         error "ERROR: Invalid params.dedup_mode '${params.dedup_mode}'. One of: ${validDedupModes().join(', ')}"
@@ -151,6 +162,9 @@ def validateParams() {
     if (params.start_at == 'annotation') {
         if (!params.input_vcf_dir)
             error "ERROR: params.start_at='annotation' requires params.input_vcf_dir (dir of <sample>.vcf.gz)."
+    } else if (params.start_at == 'classification') {
+        if (!params.input_annot_dir)
+            error "ERROR: params.start_at='classification' requires params.input_annot_dir (dir of <sample>_vep.vcf.gz)."
     } else if (startRank > stageRank()['mapping']) {
         if (!params.input_bam_dir)
             error "ERROR: params.start_at='${params.start_at}' requires params.input_bam_dir " +
@@ -160,9 +174,8 @@ def validateParams() {
         error "ERROR: dedup_mode='external' means BAMs are already deduplicated/consensus - " +
               "set start_at to 'metrics' (or later) and point input_bam_dir at them."
 
-    // -- Stage 1 (markdup path): make the inline-UMI trim visible. The default
-    //    umi_read_structure is set, so a test/other library WITHOUT inline UMIs would
-    //    silently lose its leading bases unless umi_read_structure is set to null.
+    // -- Stage 1 (markdup path): make the inline-UMI trim visible. A umi_read_structure
+    //    left set for a library WITHOUT inline UMIs would cut its leading bases.
     if (params.dedup_mode == 'markdup' && params.umi_read_structure && runsStage('mapping', startRank, stopRank))
         log.warn "dedup_mode='markdup' with umi_read_structure='${params.umi_read_structure}'" +
                  (params.umi_read_structure_r2 ? " / R2 '${params.umi_read_structure_r2}'" : "") +
@@ -188,11 +201,11 @@ def validateParams() {
         "for any run (core reference + I/O)"
     )
 
-    // -- STAGE 1 - mapping --------------------------------------
+    // -- STAGE 1 mapping --------------------------------------------
     if (runsStage('mapping', startRank, stopRank))
         requireParams(['ref_index_dir', 'fastq_root'], "for the mapping stage (BWA-MEM2 alignment)")
 
-    // -- STAGE 3 - metrics (QC) ---------------------------------
+    // -- STAGE 3 metrics --------------------------------------------
     if (runsStage('metrics', startRank, stopRank)) {
         if (params.assay == 'wes')
             requireParams(['interval_bed'], "for WES QC (mosdepth target coverage)")
@@ -205,7 +218,7 @@ def validateParams() {
         warnParams(['verifybamid_db'], "contamination QC (VerifyBamID2) will be skipped")
     }
 
-    // -- STAGE 4 - bqsr (only if params.bqsr) -------------------
+    // -- STAGE 4 bqsr (bqsr: true) ----------------------------------
     if (runsStage('bqsr', startRank, stopRank) && params.bqsr) {
         requireParams(['dbsnp', 'mills', 'known_indels'],
             "when params.bqsr = true (BQSR known-sites: dbSNP + Mills + 1000G indels)")
@@ -213,17 +226,23 @@ def validateParams() {
             requireParams(['interval_bed'], "to restrict BQSR to WES capture regions")
     }
 
-    // -- STAGE 5 - variant_calling ------------------------------
+    // -- STAGE 5 variant_calling ------------------------------------
     if (runsStage('variant_calling', startRank, stopRank)) {
         requireParams(['scatter_intervals'], "for the variant_calling stage (interval scatter for HC/Mutect2)")
+
+        if (!(params.germline_filter in ['nv', 'none', 'vqsr']))
+            error "ERROR: Invalid params.germline_filter '${params.germline_filter}'. One of: nv, none, vqsr"
 
         if (params.analysis == 'germline') {
             if (!validCallers().contains(params.germline_caller))
                 error "ERROR: Invalid params.germline_caller '${params.germline_caller}'. One of: ${validCallers().join(', ')}"
             if (params.germline_caller == 'haplotypecaller') {
                 requireParams(['dbsnp'], "for HaplotypeCaller (dbSNP annotation + GenotypeGVCFs)")
-                warnParams(['hapmap', 'omni', 'thousandg_snps', 'mills'],
-                    "FilterVariantTranches needs HapMap/Omni/1000G/Mills - germline filtering will fail without them")
+                // FilterVariantTranches (nv) and VQSR both pass each of these as a resource;
+                // a missing one renders an empty '--resource' and fails hours into the run.
+                if (params.germline_filter in ['nv', 'vqsr'])
+                    requireParams(['hapmap', 'omni', 'thousandg_snps', 'mills'],
+                        "for germline_filter='${params.germline_filter}' (FilterVariantTranches / VQSR resources)")
             }
             if (params.run_gcnv)
                 requireParams(['preprocessed_intervals', 'contig_ploidy_priors', 'gcnv_scatter_intervals'],
@@ -234,8 +253,8 @@ def validateParams() {
             if (!validCallers().contains(params.germline_caller))
                 error "ERROR: Invalid params.germline_caller '${params.germline_caller}'. One of: ${validCallers().join(', ')}"
             if (params.germline_caller == 'haplotypecaller')
-                warnParams(['hapmap', 'omni', 'thousandg_snps', 'mills'],
-                    "FilterVariantTranches needs HapMap/Omni/1000G/Mills - normals' germline filtering will fail without them")
+                requireParams(['dbsnp'] + (params.germline_filter in ['nv', 'vqsr'] ? ['hapmap', 'omni', 'thousandg_snps', 'mills'] : []),
+                    "when germline_on_normals = true with HaplotypeCaller (dbSNP + filtering resources)")
             if (params.run_gcnv && params.gcnv_in_somatic)
                 requireParams(['preprocessed_intervals', 'contig_ploidy_priors', 'gcnv_scatter_intervals'],
                     "when gcnv_in_somatic = true (germline CNV cohort model on normals)")
@@ -243,9 +262,15 @@ def validateParams() {
 
         if (params.analysis == 'somatic') {
             requireParams(['germline_resource'], "for somatic calling (Mutect2 gnomAD germline resource)")
+            if (params.use_muse_in_consensus)
+                requireParams(['dbsnp'], "for MuSE sump (-D dbSNP) when use_muse_in_consensus = true")
+            if (!(params.consensus_backbone in ['mutect2', 'union']))
+                error "params.consensus_backbone must be 'mutect2' or 'union' (got '${params.consensus_backbone}')"
             warnParams(['panel_of_normals'], "Mutect2 will run without a panel-of-normals (more false positives)")
-            warnParams(['cnvkit_pon'], "CNVkit needs a panel-of-normals reference (.cnn) to run")
-            warnParams(['msisensor_list'], "MSIsensor-pro needs a pre-scanned microsatellite list to run")
+            warnParams(['cnvkit_pon'], "CNVkit will build its reference from the matched normal (no panel-of-normals)")
+            if (params.containsKey('msi_cutoff'))
+                error "ERROR: params.msi_cutoff was replaced by msi_cutoff_paired_low / msi_cutoff_paired_high (paired) and msi_cutoff_tumor_only"
+            warnParams(['msisensor_list'], "MSI (MSIsensor-pro) will be skipped - needs a pre-scanned microsatellite list")
             warnParams(['pileup_variants'],
                 "contamination filtering (GetPileupSummaries/CalculateContamination) will be skipped")
             if (params.orientation_bias)
@@ -256,9 +281,14 @@ def validateParams() {
             error "Tumor-only workflow not yet implemented."
     }
 
-    // -- STAGE 6 - annotation -----------------------------------
+    // -- STAGE 6 annotation -----------------------------------------
     if (runsStage('annotation', startRank, stopRank)) {
         requireParams(['vep_cache_dir'], "for the annotation stage (offline VEP cache)")
+        // TMB numerator = coding consequences, so the denominator must be coding territory:
+        // capture-only (incl. UTR/intronic baits) deflates TMB by the non-coding fraction.
+        if (params.analysis == 'somatic' && params.compute_tmb && params.assay == 'wes')
+            requireParams(['tmb_coding_bed'],
+                "for WES TMB (CDS BED of the genome build; territory = capture x CDS)")
         warnParams(['clinvar_vcf'], "VEP ClinVar custom annotation will be skipped (no clinvar VCF)")
         warnParams(['vep_plugins_dir'], "VEP plugins custom annotation will be skipped (no plugins)")
     }
@@ -277,9 +307,15 @@ def validateRnaParams(int startRank, int stopRank, String sheet) {
 
     // TIER 1 - always required (core reference + I/O for the fusion arm).
     requireParams(
-        ['pipeline_root', 'work_root', 'outdir', 'container_dir', 'ctat_lib'],
-        "for the RNA fusion workflow (CTAT lib + I/O)"
+        ['pipeline_root', 'work_root', 'outdir', 'container_dir'],
+        "for the RNA fusion workflow (I/O)"
     )
+    // The CTAT library is needed for STAR-Fusion / FusionInspector, for its genome + GTF
+    // (rna_use_ctat_reference) and for its STAR index when star_index is not given; an
+    // Arriba-only run on its own reference and STAR index does not need it.
+    def needs_ctat = params.rna_use_ctat_reference || params.use_starfusion || params.use_fusioninspector || !params.star_index
+    if (needs_ctat)
+        requireParams(['ctat_lib'], "for the RNA arm (CTAT library: STAR-Fusion/FusionInspector, rna_use_ctat_reference, or its STAR index)")
     if (params.rna_use_ctat_reference && params.star_index)
         log.warn "star_index='${params.star_index}' is set while rna_use_ctat_reference=true: STAR aligns to that index " +
                  "but Arriba/CRAM/counts use the CTAT genome+GTF. Use star_index: null (CTAT index) or rna_use_ctat_reference: false."
@@ -304,18 +340,19 @@ def validateRnaParams(int startRank, int stopRank, String sheet) {
         error "ERROR: start_at='${params.start_at}' requires params.input_bam_dir " +
               "(dir of <sample_id>.Aligned.sortedByCoord.out.bam [+ .Chimeric.out.junction])."
 
-    // STAGE 1 - mapping (STAR).
+    // -- STAGE 1 mapping (RNA: STAR) --------------------------------
     if (runsStage('mapping', startRank, stopRank)) {
         requireParams(['fastq_root'], "for STAR alignment (FASTQ input root)")
         if (!params.star_index && !params.ctat_lib)
             error "ERROR: mapping needs params.star_index, or params.ctat_lib (its STAR index is used in shared mode)."
     }
 
-    // STAGE 3 - RNA QC: Picard CollectRnaSeqMetrics cannot run without REF_FLAT.
+    // -- STAGE 3 metrics (RNA) --------------------------------------
+    // Without REF_FLAT, Picard CollectRnaSeqMetrics is skipped (strandedness is still reported).
     if (runsStage('metrics', startRank, stopRank))
-        requireParams(['refflat'], "for RNA QC (Picard CollectRnaSeqMetrics --REF_FLAT)")
+        warnParams(['refflat'], "RNA-seq metrics (Picard CollectRnaSeqMetrics) will be skipped")
 
-    // STAGE 5 - fusion calling.
+    // -- STAGE 5 variant_calling (RNA: fusion calling) --------------
     if (runsStage('variant_calling', startRank, stopRank)) {
         if (!(params.use_arriba || params.use_starfusion || params.use_fusioncatcher))
             error "ERROR: at least one fusion caller must be enabled (use_arriba / use_starfusion / use_fusioncatcher)."
@@ -328,7 +365,7 @@ def validateRnaParams(int startRank, int stopRank, String sheet) {
         warnParams(['known_fusions_tsv'], "single-caller known-fusion RESCUE and known-fusion tiering will be limited")
     }
 
-    // STAGE 6 - annotation.
+    // -- STAGE 6 annotation (RNA) -----------------------------------
     if (runsStage('annotation', startRank, stopRank))
         warnParams(['cosmic_cgc_tsv', 'known_fusions_tsv'],
             "fusion tiering will be limited (no COSMIC CGC gene roles / known-fusion catalog)")
@@ -341,6 +378,42 @@ def validateRnaParams(int startRank, int stopRank, String sheet) {
 //  RUN SUMMARY  (function - called from workflow{})
 // ============================================================
 // pad helper for the summary table (top-level function; strict-safe)
+// Resume guard. With the strict (v2) syntax parser, default since Nextflow 26.04, a
+// parameter used inside a process script is not part of the task hash: after a parameter
+// change, -resume reuses the old task results (verified on 26.04.1: a changed
+// consensus_backbone re-used the old consensus). Store the parameters next to the work
+// directory and refuse a resumed run whose parameters changed, unless allowed.
+// Parameters that cannot change task results are not compared.
+def checkResumeParams() {
+    // start_at / stop_at only choose which stages run (extending a run with -resume is the
+    // normal use); they change no task's command, so they are not treated as a change.
+    def skip = ['outdir', 'work_root', 'detailed_reports', 'bind_paths', 'write_manifest',
+                'allow_param_change_on_resume', 'start_at', 'stop_at'] as Set
+    def keys = params.keySet().findAll { k -> !(k in skip) && !k.startsWith('lsf_') && !k.contains('-') }.sort()
+    def cur  = keys.collectEntries { k -> [(k): (params[k] == null ? 'null' : params[k].toString())] }
+    def snap = file("${params.work_root}/.papio_params.tsv")
+    if (workflow.resume && snap.exists()) {
+        def old = snap.text.readLines().findAll { l -> l }.collectEntries { l ->
+            def kv = l.split('\t', 2)
+            [(kv[0]): (kv.size() > 1 ? kv[1] : '')]
+        }
+        def changed = (old.keySet() + cur.keySet()).findAll { k -> !(k in skip) && old[k] != cur[k] }.sort()
+        if (changed) {
+            def lines = changed.collect { k -> "    ${k}: ${old[k] ?: '(unset)'} -> ${cur[k] ?: '(unset)'}" }.join('\n')
+            def msg = "Parameters changed since the run being resumed:\n${lines}\n" +
+                      "  Nextflow's strict parser does not re-run cached tasks for a parameter change, so the affected\n" +
+                      "  results would be stale. Run without -resume, or with a new work_root, or set\n" +
+                      "  allow_param_change_on_resume: true if no cached task uses these parameters."
+            if (params.allow_param_change_on_resume)
+                log.warn msg
+            else
+                error "ERROR: ${msg}"
+        }
+    }
+    snap.parent.mkdirs()
+    snap.text = cur.collect { k, v -> "${k}\t${v}" }.join('\n') + '\n'
+}
+
 def pad(s, n) { (s ?: 'not set').toString().padRight(n) }
 
 // ============================================================
@@ -383,7 +456,8 @@ def printSummary() {
 workflow {
     main:
     def (startRank, stopRank, sheet) = validateParams()
-    println "worksheet=${sheet}"
+    checkResumeParams()
+    log.info "Samplesheet: ${sheet}"
     printSummary()
 
     if (params.assay in ['wes', 'wgs']) {
@@ -400,7 +474,7 @@ workflow {
 -  Pipeline completed: ${(workflow.success ? 'SUCCESS' : 'FAILED').padRight(68)}-
 -  Duration         : ${workflow.duration.toString().padRight(68)}-
 -  Exit status      : ${workflow.exitStatus.toString().padRight(68)}-
--  Output directory : ${params.outdir.padRight(68)}-
+-  Output directory : ${(params.outdir ?: 'not set').toString().padRight(68)}-
 ------------------------------------------------------------
 """.stripIndent()
     // Failure details live here, not in an onError: section - on Nextflow 26.04 the onError

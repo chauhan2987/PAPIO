@@ -31,7 +31,7 @@ include { toFileChannel; toOptionalFileChannel; stripChunkMeta } from './workflo
 //  ---------------- components_common ------------------------
 include { MANIFEST_ROW                } from './components_common'
 include { WRITE_MANIFEST              } from './components_common'
-
+include { EVIDENCE_BAM                } from './components_common'
 //  --------------- multistage processes ----------------------
 // Reused, assay-agnostic processes from the DNA arm (single source of truth).
 include { MULTIQC                     } from './components_common'
@@ -41,8 +41,8 @@ include { SAMTOOLS_STATS              } from './components_common'
 
 // RNA-specific processes.
 include {
-    STAR_ALIGN; RNASEQ_METRICS;
-    ARRIBA; STARFUSION; FUSIONCATCHER;
+    STAR_ALIGN; SALMON_QUANT; RNASEQ_METRICS;
+    ARRIBA; STARFUSION; FUSIONCATCHER; RNA_IMMUNE_PREP; TRUST4; TELESCOPE;
     FUSION_CONSENSUS; FILTER_FUSION_CANDIDATES; FUSIONINSPECTOR;
     ANNOTATE_FUSIONS; CONSOLIDATE_FUSION_REPORT
 } from './components_rna'
@@ -50,7 +50,7 @@ include {
 
 
 // ============================================================
-//  RNA_WORKFLOW  -  entry sub-workflow (called from main_v3.nf)
+//  RNA_WORKFLOW  -  entry sub-workflow (called from main.nf)
 // ============================================================
 workflow RNA_WORKFLOW {
 
@@ -74,12 +74,16 @@ workflow RNA_WORKFLOW {
 
     // In shared mode the STAR index MUST be the CTAT lib's index (kickstart
     // consistency); default to it unless params.star_index is set explicitly.
-    ch_ctat_lib    = toFileChannel(params.ctat_lib)
+    ch_ctat_lib    = toOptionalFileChannel(params.ctat_lib)   // required only when used (main.nf checks)
     ch_star_index  = params.star_index ? toFileChannel(params.star_index): toFileChannel("${params.ctat_lib}/ref_genome.fa.star.idx")
 
     ch_arriba_bl = params.arriba_blacklist        ? toFileChannel(params.arriba_blacklist)        : channel.value([])
     ch_arriba_kf = params.arriba_known_fusions    ? toFileChannel(params.arriba_known_fusions)    : channel.value([])
     ch_arriba_pd = params.arriba_protein_domains  ? toFileChannel(params.arriba_protein_domains)  : channel.value([])
+
+    ch_trust4_ref = toOptionalFileChannel(params.trust4_ref_dir)
+    ch_herv_gtf  = toOptionalFileChannel(params.telescope_gtf)
+    ch_evidence_bed = toOptionalFileChannel(params.evidence_bed)
 
     ch_fc_db     = toOptionalFileChannel(params.fusioncatcher_db)
     ch_known_fus = toOptionalFileChannel(params.known_fusions_tsv)
@@ -90,6 +94,19 @@ workflow RNA_WORKFLOW {
     // -- read ingestion + per-sample grouping -----------------------------
     GENERATE_RNA_META_INFO(samplesheet)
     ch_manifest = GENERATE_RNA_META_INFO.out.reads
+    // Unique chunk IDs (<sample>_L<lane>_C<chunk>): a repeated row would align the same reads twice.
+    ch_manifest
+        .map { meta, _reads -> tuple(meta.uid, 1) }
+        .groupTuple()
+        .map { uid, n -> if (n.size() > 1) error "RNA samplesheet has ${n.size()} rows for ${uid} (same sample, lane_num and chunk)"; uid }
+    // All rows of one sample must agree on sample-level fields (a sample is aligned once,
+    // from its first row's meta: a mixed single/paired-end sample would lose its R2 mates, and
+    // unlabelled RN + RT rows of one patient would be merged into one <patient>_R library).
+    ch_manifest
+        .map { meta, _reads -> tuple(meta.sample_id, [patient: meta.patient_id, type: meta.type, single_end: meta.single_end]) }
+        .unique()
+        .groupTuple()
+        .map { sid, vals -> if (vals.size() > 1) error "RNA samplesheet rows of ${sid} disagree on patient/sample_type/single_end: ${vals} - every row (lane/chunk) of one sample needs the same values; an RN and an RT sample of one patient both default to <patient>_R, so give them distinct 'sample' labels"; sid }
 
     if (params.write_manifest) {
             // One row per sample (input file is the first read / BAM), then consolidate.
@@ -99,9 +116,9 @@ workflow RNA_WORKFLOW {
                 tuple(meta, f)
             }
             MANIFEST_ROW(ch_manifest_input)
-            WRITE_MANIFEST(MANIFEST_ROW.out.row.collect())
+            WRITE_MANIFEST(MANIFEST_ROW.out.row.collect(sort: true))
     }
-        
+
 
     // -- Entry-point: Per-sample reads (unconditional) ----------------------
     // Grouped from the chunk-level manifest. Needed by BOTH the align path and
@@ -112,17 +129,20 @@ workflow RNA_WORKFLOW {
         .map { sid, metas, reads_list ->
             def m0          = metas[0]
             def sample_meta = m0.findAll { k, v -> !(k in ['uid', 'rg']) }
-            def r1 = reads_list.collect { it[0] }
-            def r2 = sample_meta.single_end ? [] : reads_list.collect { it[1] }
+            // Sort chunk pairs by R1 name (pairs move as units, so R1/R2 stay matched):
+            // groupTuple order = completion order, which would change STAR's input hash.
+            def pairs = reads_list.collect { rp -> rp }.sort { rp -> rp[0].name }
+            def r1 = pairs.collect { rp -> rp[0] }
+            def r2 = sample_meta.single_end ? [] : pairs.collect { rp -> rp[1] }
             tuple(sample_meta, r1, r2)
         }
 
     // --------------------------------------------------------------------
-    //  STAGE 1 (rank 1) - STAR alignment, OR stage prior BAM/CRAM for re-entry
+    //  STAGE 1 mapping: STAR alignment, or the BAM/CRAM of an earlier run for re-entry
     //  (same stageRuns('mapping') gate + cram-preferred idiom as the DNA workflow)
     // --------------------------------------------------------------------
     if (stageRuns('mapping')) {
-        STAR_ALIGN(ch_reads, ch_star_index, ch_gtf)
+        STAR_ALIGN(ch_reads, ch_star_index)
         ch_bam      = STAR_ALIGN.out.bam           // tuple(meta, bam, bai)
         ch_chimeric = STAR_ALIGN.out.chimeric      // tuple(meta, junction)
         ch_star_log = STAR_ALIGN.out.log
@@ -146,13 +166,22 @@ workflow RNA_WORKFLOW {
         ch_star_log = channel.empty()
     }
 
+    // -- Salmon quantification (independent of the fusion path) -----------
+    //   Gated on salmon_index only: ch_reads is built unconditionally, so this
+    //   also runs on re-entry runs without re-running STAR.
+    ch_salmon_qc = channel.empty()
+    if (params.salmon_index) {
+        SALMON_QUANT(ch_reads, toFileChannel(params.salmon_index))
+        ch_salmon_qc = SALMON_QUANT.out.results.map { meta, d -> d }
+    }
+
     // disk: archive the (large) STAR BAM as CRAM - only when we actually aligned
     if (stageRuns('mapping') && params.rna_cram_convert) {
         CRAM_CONVERT('rna', ch_bam, ch_ref_fasta, ch_ref_fai)
     }
 
     // --------------------------------------------------------------------
-    //  STAGE 3 (rank 3) - RNA QC  (MarkDuplicates QC-only, CollectRnaSeqMetrics)
+    //  STAGE 3 metrics: RNA QC (CollectRnaSeqMetrics, strandedness, samtools stats)
     // --------------------------------------------------------------------
     if (stageRuns('metrics')) {
         // STAR gene counts (this run only) drive strandedness inference; [] on re-entry.
@@ -170,13 +199,14 @@ workflow RNA_WORKFLOW {
         ch_qc = ch_star_log
             .mix(RNASEQ_METRICS.out.metrics.map { meta, f -> f })
             .mix(SAMTOOLS_STATS.out.stats.map    { meta, f -> f })
-            .collect()
+            .mix(ch_salmon_qc)
+            .collect(sort: true)
             .map { files -> tuple('rna_fusion', files) }
         MULTIQC(ch_qc)
     }
 
     // --------------------------------------------------------------------
-    //  STAGE 5 (rank 5) - fusion calling -> consensus -> in-silico validation
+    //  STAGE 5 variant_calling: fusion calling -> consensus -> in-silico validation
     // --------------------------------------------------------------------
     if (stageRuns('variant_calling')) {
 
@@ -186,6 +216,21 @@ workflow RNA_WORKFLOW {
             ch_arriba = ARRIBA.out.fusions
         } else {
             ch_arriba = ch_bam.map { meta, bam, bai -> tuple(meta, []) }
+        }
+
+        // ---- immune features: TCR/BCR (TRUST4) and HERV (Telescope) from the STAR BAM or CRAM ----
+        if (params.trust4_ref_dir || params.telescope_gtf) {
+            RNA_IMMUNE_PREP(ch_bam, ch_ref_fasta, ch_ref_fai)
+            if (params.trust4_ref_dir) {
+                TRUST4(RNA_IMMUNE_PREP.out.coord, ch_trust4_ref)
+            }
+            if (params.telescope_gtf) {
+                TELESCOPE(RNA_IMMUNE_PREP.out.collated, ch_herv_gtf)
+            }
+        }
+
+        if (params.evidence_bed) {
+            EVIDENCE_BAM(ch_bam, ch_evidence_bed, ch_ref_fasta, ch_ref_fai)
         }
 
         // ---- caller 2: STAR-Fusion (kickstart from junction, or full mode) ----
@@ -203,8 +248,8 @@ workflow RNA_WORKFLOW {
 
         // ---- caller 3: FusionCatcher (PE only; SE<130bp unsupported upstream) ----
         if (params.use_fusioncatcher) {
-            ch_fc_branch = ch_reads.branch {
-                run:  !it[0].single_end || params.fusioncatcher_allow_se
+            ch_fc_branch = ch_reads.branch { row ->
+                run:  !row[0].single_end || params.fusioncatcher_allow_se
                 skip: true
             }
             FUSIONCATCHER(ch_fc_branch.run.map { meta, r1, r2 -> tuple(meta, r1, r2) }, ch_fc_db)
@@ -221,7 +266,7 @@ workflow RNA_WORKFLOW {
             .join(ch_fc.map     { meta, f -> tuple(meta.sample_id, f) })
             .map { sid, meta, a, s, f -> tuple(meta, a, s, f) }
 
-        FUSION_CONSENSUS(ch_consensus_in, ch_known_fus)
+        FUSION_CONSENSUS(ch_consensus_in, ch_known_fus, ch_gtf, ch_ctat_lib)
 
         // ---- in-silico validation: FusionInspector on the PASS_* candidate list ----
         // if (params.use_fusioninspector) {
@@ -258,24 +303,27 @@ workflow RNA_WORKFLOW {
     }
 
     // --------------------------------------------------------------------
-    //  STAGE 6 (rank 6) - annotation (known-fusion DB + COSMIC CGC tiering)
+    //  STAGE 6 annotation: known fusions and COSMIC CGC tiers
     // --------------------------------------------------------------------
     if (stageRuns('annotation')) {
         ch_annot_in = FUSION_CONSENSUS.out.consensus
             .map { meta, c -> tuple(meta.sample_id, meta, c) }
             .join(ch_validated.map { meta, v -> tuple(meta.sample_id, v) })
-            .map { sid, meta, c, v -> tuple(meta, c, v) }
+            .join(FUSION_CONSENSUS.out.names.map { meta, n -> tuple(meta.sample_id, n) })
+            .map { sid, meta, c, v, n -> tuple(meta, c, v, n) }
         ANNOTATE_FUSIONS(ch_annot_in, ch_cgc_tsv, ch_known_fus)
     }
 
     // --------------------------------------------------------------------
-    //  STAGE 7 (rank 7) - per-patient consolidated fusion report
+    //  STAGE 7 classification: consolidated fusion report per patient
     // --------------------------------------------------------------------
     if (stageRuns('classification')) {
         ch_report_in = ANNOTATE_FUSIONS.out.annotated
             .map { meta, a -> tuple(meta.sample_id, meta, a) }
             .join(FUSION_CONSENSUS.out.stats.map { meta, s -> tuple(meta.sample_id, s) })
-            .map { sid, meta, a, s -> tuple(meta.patient_id, meta.sample_id, a, s) }
+            // report name: patient_id for the classic <patient>_R sample, else the sample_id
+            .map { _sid, meta, a, s ->
+                tuple((meta.sample_id == "${meta.patient_id}_R") ? meta.patient_id : meta.sample_id, meta.sample_id, a, s) }
         CONSOLIDATE_FUSION_REPORT(ch_report_in)
     }
 }
