@@ -4,9 +4,11 @@
 # Date   : 2026-11-17
 # Purpose: Build the slim gnomAD v4.1 joint (exome + genome) VCF used by PAPIO
 #          as the population frequency for variant classification
-#          (params.gnomad_faf_vcf). Keeps one INFO field, fafmax_faf95_max_joint
-#          (grpmax filtering allele frequency, the field ClinGen recommends for
-#          ACMG/AMP BA1/BS1), on PASS records only.
+#          (params.gnomad_faf_vcf). Keeps one INFO field, gnomAD's
+#          fafmax_faf95_max_joint (joint grpmax filtering allele frequency, the
+#          field ClinGen recommends for ACMG/AMP BA1/BS1), on PASS records only,
+#          renamed fafmax_faf95_max_j: the name in the slim Zenodo file of
+#          README Appendix A step 7.6, which the pipeline reads.
 #          Run once per gnomAD release; the output is reused across runs.
 #
 # Usage  : bash prepare_gnomad_faf.sh <out_dir> [threads]
@@ -24,7 +26,8 @@ THREADS=${2:-4}
 RELEASE="4.1"
 URL_BASE="https://storage.googleapis.com/gcp-public-data--gnomad/release/${RELEASE}/vcf/joint"
 GNOMAD_SRC=${GNOMAD_SRC:-}
-FIELD="fafmax_faf95_max_joint"
+FIELD_SRC="fafmax_faf95_max_joint"    # name in the gnomAD joint VCFs
+FIELD="fafmax_faf95_max_j"            # name the pipeline reads
 CHROMS=$(echo chr{1..22} chrX chrY)
 OUT="${OUT_DIR}/gnomad.joint.v${RELEASE}.faf95.vcf.gz"
 
@@ -46,7 +49,8 @@ fetch_chrom() {
 slim_chrom() {
     local src=$1 chr=$2
     bcftools view --threads "$THREADS" -f PASS -Ou "$src" \
-    | bcftools annotate --threads "$THREADS" -x "^INFO/${FIELD}" -Ob \
+    | bcftools annotate --threads "$THREADS" -x "^INFO/${FIELD_SRC}" -Ou \
+    | bcftools annotate --threads "$THREADS" --rename-annots "${OUT_DIR}/tmp/rename.txt" -Ob \
         -o "${OUT_DIR}/tmp/${chr}.bcf"
     bcftools index -f "${OUT_DIR}/tmp/${chr}.bcf"
 }
@@ -54,6 +58,7 @@ slim_chrom() {
 #------------------------------------------------------------------------------
 ##### Main Script
 mkdir -p "${OUT_DIR}/tmp"
+printf 'INFO/%s %s\n' "$FIELD_SRC" "$FIELD" > "${OUT_DIR}/tmp/rename.txt"
 for chr in $CHROMS; do
     echo "[$(date '+%F %T')] ${chr}"
     src=$(fetch_chrom "$chr")

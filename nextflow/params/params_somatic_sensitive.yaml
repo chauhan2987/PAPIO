@@ -11,15 +11,15 @@
 # ==============================================================================
 
 # ---- run paths ---------------------------------------------------------------
-pipeline_root   : /path/to/PAPIO
-work_root       : /path/to/run/somatic_demo_sensitive
-outdir          : /path/to/run/somatic_demo_sensitive/Result
-container_dir   : /path/to/papio_containers
-bind_paths      : ['/path/to/papio_resources', '/path/to/run', '/path/to/demo']
+pipeline_root   : ${projectDir}
+work_root       : ${projectDir}/../runs/somatic_demo_sensitive
+outdir          : ${projectDir}/../runs/somatic_demo_sensitive/Result
+container_dir   : ${projectDir}/../containers
+bind_paths      : ['${projectDir}/../references', '${projectDir}/../runs', '${projectDir}/../demo']
 
 # ---- input -------------------------------------------------------------------
-fastq_root      : /path/to/demo/fastq
-dna_samplesheet : /path/to/demo/samplesheets/dna_somatic.csv
+fastq_root      : ${projectDir}/../demo/fastq
+dna_samplesheet : ${projectDir}/../demo/samplesheets/dna_somatic.csv
 
 # ---- mode --------------------------------------------------------------------
 assay           : wes
@@ -35,32 +35,32 @@ umi_read_structure : null
 bqsr               : false
 
 # ---- reference genome (GRCh38.d1.vd1) ----------------------------------------
-ref_index_dir   : /path/to/papio_resources/genome/bwa_mem2
-ref_fasta       : /path/to/papio_resources/genome/GRCh38.d1.vd1.fa
-ref_fai         : /path/to/papio_resources/genome/GRCh38.d1.vd1.fa.fai
-ref_dict        : /path/to/papio_resources/genome/GRCh38.d1.vd1.dict
-dbsnp           : /path/to/papio_resources/gatk/Homo_sapiens_assembly38.dbsnp138.vcf.gz
-mills           : /path/to/papio_resources/gatk/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
-known_indels    : /path/to/papio_resources/gatk/Homo_sapiens_assembly38.known_indels.vcf.gz
+ref_index_dir   : ${projectDir}/../references/genome/bwa_mem2
+ref_fasta       : ${projectDir}/../references/genome/GRCh38.d1.vd1.fa
+ref_fai         : ${projectDir}/../references/genome/GRCh38.d1.vd1.fa.fai
+ref_dict        : ${projectDir}/../references/genome/GRCh38.d1.vd1.dict
+dbsnp           : ${projectDir}/../references/gatk/Homo_sapiens_assembly38.dbsnp138.vcf.gz
+mills           : ${projectDir}/../references/gatk/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
+known_indels    : ${projectDir}/../references/gatk/Homo_sapiens_assembly38.known_indels.vcf.gz
 
 # ---- capture kit: Agilent SureSelect V6+UTR (S07604624) - demo ---------------
-interval_bed         : /path/to/papio_resources/capture/S07604624/S07604624_targets.bed
-bait_interval_list   : /path/to/papio_resources/capture/S07604624/S07604624_baits.interval_list
-target_interval_list : /path/to/papio_resources/capture/S07604624/S07604624_targets.interval_list
-call_regions_gz      : /path/to/papio_resources/capture/S07604624/S07604624_targets_pad100.bed.gz
-scatter_intervals    : /path/to/papio_resources/capture/S07604624/scatter_24_pad100
+interval_bed         : ${projectDir}/../references/capture/S07604624/S07604624_targets.bed
+bait_interval_list   : ${projectDir}/../references/capture/S07604624/S07604624_baits.interval_list
+target_interval_list : ${projectDir}/../references/capture/S07604624/S07604624_targets.interval_list
+call_regions_gz      : ${projectDir}/../references/capture/S07604624/S07604624_targets_pad100.bed.gz
+scatter_intervals    : ${projectDir}/../references/capture/S07604624/S07604624_scatter_24_pad100
 
 # ---- capture kit: Agilent SureSelect V7 (S31285117) - own cohort -------------
-# interval_bed         : /path/to/papio_resources/capture/S31285117/S31285117_targets.bed
-# bait_interval_list   : /path/to/papio_resources/capture/S31285117/S31285117_baits.interval_list
-# target_interval_list : /path/to/papio_resources/capture/S31285117/S31285117_targets.interval_list
-# call_regions_gz      : /path/to/papio_resources/capture/S31285117/S31285117_targets_pad100.bed.gz
-# scatter_intervals    : /path/to/papio_resources/capture/S31285117/scatter_24_pad100
+# interval_bed         : ${projectDir}/../references/capture/S31285117/S31285117_targets.bed
+# bait_interval_list   : ${projectDir}/../references/capture/S31285117/S31285117_baits.interval_list
+# target_interval_list : ${projectDir}/../references/capture/S31285117/S31285117_targets.interval_list
+# call_regions_gz      : ${projectDir}/../references/capture/S31285117/S31285117_targets_pad100.bed.gz
+# scatter_intervals    : ${projectDir}/../references/capture/S31285117/S31285117_scatter_24_pad100
 
 # ---- somatic calling ---------------------------------------------------------
-germline_resource : /path/to/papio_resources/gatk/af-only-gnomad.hg38.vcf.gz
-panel_of_normals  : /path/to/papio_resources/gatk/1000g_pon.hg38.vcf.gz
-pileup_variants   : /path/to/papio_resources/gatk/small_exac_common_3.hg38.vcf.gz
+germline_resource : ${projectDir}/../references/gatk/af-only-gnomad.hg38.vcf.gz
+panel_of_normals  : ${projectDir}/../references/gatk/1000g_pon.hg38.vcf.gz
+pileup_variants   : ${projectDir}/../references/gatk/small_exac_common_3.hg38.vcf.gz
 orientation_bias  : true
 
 somatic_consensus           : true
@@ -73,28 +73,28 @@ consensus_filter_mode       : tag     # tag = keep all, label sub-threshold LOWC
 somatic_filter_mode         : tag     # tag = keep all, label failing filters
 
 # ---- CNV / purity / MSI / QC (each optional; step skipped if unset) -----------
-cnvkit_pon         : /path/to/papio_resources/capture/S07604624/cnvkit_pon.cnn   # must be built for the SAME capture kit
-msisensor_list     : /path/to/papio_resources/msi/GRCh38.d1.vd1.msisensor.list
-sequenza_gc_wiggle : /path/to/papio_resources/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz
-gene_bed           : /path/to/papio_resources/annotation/ensembl115_genes.bed
-tmb_coding_bed     : /path/to/papio_resources/annotation/ensembl115_MANE_CDS.bed   # WES TMB territory = capture x CDS (README Appendix A, step 6)
-arm_bed            : /path/to/papio_resources/annotation/GRCh38_arms.bed   # chromosome arms (README Appendix A, step 6.3)
-verifybamid_db     : /path/to/papio_resources/verifybamid2/1000g.phase3.100k.b38
-somalier_sites     : /path/to/papio_resources/somalier/sites.hg38.vcf.gz
-somalier_ancestry_labels : /path/to/papio_resources/somalier/ancestry-labels-1kg.tsv   # ancestry of normals (optional)
-somalier_1kg_dir         : /path/to/papio_resources/somalier/1kg-somalier
-coverage_report_bed      : /path/to/papio_resources/annotation/reportable_genes_MANE_CDS.bed   # per-gene coverage of reportable genes
+cnvkit_pon         : ${projectDir}/../references/capture/S07604624/S07604624_cnvkit_pon.cnn   # must be built for the SAME capture kit
+msisensor_list     : ${projectDir}/../references/msi/GRCh38.d1.vd1.msisensor.list
+sequenza_gc_wiggle : ${projectDir}/../references/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz
+gene_bed           : ${projectDir}/../references/annotation/ensembl115_genes.bed
+tmb_coding_bed     : ${projectDir}/../references/annotation/ensembl115_MANE_CDS.bed   # WES TMB territory = capture x CDS (README Appendix A, step 6)
+arm_bed            : ${projectDir}/../references/annotation/GRCh38_arms.bed   # chromosome arms (README Appendix A, step 6.3)
+verifybamid_db     : ${projectDir}/../references/verifybamid2/1000g.phase3.100k.b38
+somalier_sites     : ${projectDir}/../references/somalier/sites.hg38.vcf.gz
+somalier_ancestry_labels : ${projectDir}/../references/somalier/ancestry-labels-1kg.tsv   # ancestry of normals (optional)
+somalier_1kg_dir         : ${projectDir}/../references/somalier/1kg-somalier
+coverage_report_bed      : ${projectDir}/../references/annotation/ensembl115_reportable_genes_MANE_CDS.bed   # per-gene coverage of reportable genes
 
 # ---- annotation + classification ---------------------------------------------
-vep_cache_dir     : /path/to/papio_resources/vep_cache
+vep_cache_dir     : ${projectDir}/../references/vep_cache
 vep_cache_version : 115
-vep_plugins_dir   : /path/to/papio_resources/vep_plugins
-clinvar_vcf       : /path/to/papio_resources/clinvar/clinvar_YYYYMMDD.vcf.gz
-gnomad_faf_vcf    : /path/to/papio_resources/gnomad/variantsGnomADv4.1Joint.vcf.bgz   # gnomAD v4.1 filtering AF (README Appendix A, step 7.6)
-germline_report_genes : /path/to/papio_resources/annotation/reportable_genes.txt   # germline LoF report gene list (edit for your study)
-cosmic_vcf        : /path/to/papio_resources/cosmic/cosmic_genome_screens_v104_chr_dedup.vcf.gz   # COSMIC licence
-cosmic_cgc_tsv    : /path/to/papio_resources/cosmic/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz  # COSMIC licence
-annotsv_dir       : /path/to/papio_resources/annotsv
+vep_plugins_dir   : ${projectDir}/../references/vep_plugins
+clinvar_vcf       : ${projectDir}/../references/clinvar/clinvar_YYYYMMDD.vcf.gz
+gnomad_faf_vcf    : ${projectDir}/../references/gnomad/variantsGnomADv4.1Joint.vcf.bgz   # gnomAD v4.1 filtering AF (README Appendix A, step 7.6)
+germline_report_genes : ${projectDir}/../references/annotation/reportable_genes.txt   # germline LoF report gene list (edit for your study)
+cosmic_vcf        : ${projectDir}/../references/cosmic/Cosmic_GenomeScreensMutant_Normal_v104_GRCh38.chr_dedup.vcf.gz   # COSMIC licence
+cosmic_cgc_tsv    : ${projectDir}/../references/cosmic/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz  # COSMIC licence
+annotsv_dir       : ${projectDir}/../references/annotsv
 
 # ---- scheduler ---------------------------------------------------------------
 lsf_project : null

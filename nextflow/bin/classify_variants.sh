@@ -109,8 +109,8 @@ fi
 # Population AF: gnomAD grpmax FAF95 when annotated (ClinGen SVI field for BA1/BS1), else
 # the VEP cache field (MAX_AF by default, which includes founder and small groups). A VEP
 # run without either lacks the field: split-vep would abort, so write '.' instead.
-if grep -qx "gnomAD_fafmax_faf95_max_joint" <<< "$fields"; then
-    AF_NAME='gnomAD_FAF95_GRPMAX'; AF_FMT='%gnomAD_fafmax_faf95_max_joint'
+if grep -qx "gnomAD_fafmax_faf95_max_j" <<< "$fields"; then
+    AF_NAME='gnomAD_FAF95_GRPMAX'; AF_FMT='%gnomAD_fafmax_faf95_max_j'
 elif grep -qx "${AF_FIELD}" <<< "$fields"; then
     AF_NAME="${AF_FIELD}"; AF_FMT="%${AF_FIELD}"
 else

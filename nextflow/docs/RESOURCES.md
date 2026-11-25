@@ -40,6 +40,7 @@ library (GENCODE v44). The test bundle uses a mini CTAT library for every RNA st
 | `hapmap`, `omni`, `thousandg_snps`, `mills` | training/truth sites | **required** (HaplotypeCaller; run stops at start) | – | GATK hg38 bundle | none |
 | `preprocessed_intervals`, `contig_ploidy_priors`, `gcnv_scatter_intervals` | gCNV cohort model inputs | **required if** `run_gcnv: true` | – | built once (GATK `PreprocessIntervals` etc.); needs ≥ 30 normals | none |
 | `roh_af_file` | population AF file (tabixed) | optional (WGS only) | ROH skipped | derived from gnomAD | none |
+| `germline_scatter_intervals` | directory of 150 germline interval shards (padded targets, same kit) | optional | germline calling uses the 24 somatic shards (`scatter_intervals`): fewer, longer jobs | built once from the target BED (GATK `SplitIntervals`; `setup.sh --kit`) | none |
 
 ## Shared QC
 
@@ -48,6 +49,8 @@ library (GENCODE v44). The test bundle uses a mini CTAT library for every RNA st
 | `bait_interval_list`, `target_interval_list` | Picard interval lists | optional | CollectHsMetrics skipped | built once: Picard `BedToIntervalList` | none |
 | `verifybamid_db` | VerifyBamID2 SVD resource | optional | contamination QC skipped | shipped in the VerifyBamID2 repository (`resource/`) | none |
 | `somalier_sites` | somalier sites VCF | optional | sample-swap/relatedness check skipped | somalier GitHub releases | none |
+| `somalier_ancestry_labels`, `somalier_1kg_dir` | 1000 Genomes ancestry labels and their somalier profiles | optional (both together) | ancestry prediction skipped; sex, relatedness and swaps still checked | somalier GitHub releases / Zenodo (`setup.sh --full`) | none |
+| `coverage_report_bed` | MANE coding exons of the reportable genes (column 4 = gene) | optional | per-gene coverage table skipped | built once from the Ensembl 115 GTF and `reportable_genes.txt` | none |
 | `dbsnp`, `mills`, `known_indels` | BQSR known sites | **required if** `bqsr: true` | – | GATK hg38 bundle | none |
 
 ## Annotation and classification (DNA)
@@ -55,9 +58,12 @@ library (GENCODE v44). The test bundle uses a mini CTAT library for every RNA st
 | Parameter | Resource | Status | Without it | Source | Registration |
 |---|---|---|---|---|---|
 | `tmb_coding_bed` | MANE Select coding exons (merged BED, Ensembl 115) | **required** for WES TMB (`compute_tmb: true`) | – | built once from the Ensembl GTF (README Appendix A, step 6) | none |
+| `gene_bed` | Ensembl 115 genes (chr, start, end, symbol, Ensembl ID) | optional | gene-level LOH (Sequenza) and gene mapping of unstable MSI sites skipped | built once from the Ensembl 115 GTF | none |
+| `arm_bed` | chromosome arms from the UCSC hg38 cytoband | optional | no arm-level copy-number table | built once from `cytoBand.txt.gz` | none |
+| `germline_report_genes` | reportable genes, one symbol per line | optional | germline loss-of-function section uses the CGC germline genes only | your own list (`reportable_genes.txt`) | none |
 | `clinvar_vcf` | ClinVar VCF (dated release) | optional | no ClinVar fields | NCBI ClinVar FTP | none |
 | `cosmic_vcf` | COSMIC Genome Screens Mutant VCF | optional | no COSMIC recurrence | COSMIC | **COSMIC licence** (free for academic use) |
-| `gnomad_faf_vcf` | gnomAD v4.1 joint grpmax filtering AF (`fafmax_faf95_max_joint`), MANE regions | recommended | classification uses VEP MAX_AF | Zenodo 10.5281/zenodo.23531816 (CC BY 4.0), or `scripts/prepare_gnomad_faf.sh` for all sites | none (open data) |
+| `gnomad_faf_vcf` | gnomAD v4.1 joint grpmax filtering AF (`fafmax_faf95_max_j`), MANE regions | recommended | classification uses VEP MAX_AF | Zenodo 10.5281/zenodo.23531816 (CC BY 4.0), or `scripts/prepare_gnomad_faf.sh` for all sites | none (open data) |
 | `germline_af_thresholds` | Gene-specific germline BA1/BS1 (TSV: GENE, BA1, BS1) | optional | global 0.05 / 0.01 | ClinGen Criteria Specification Registry (cspec.genome.network) | none |
 | `vep_plugins_dir/NMD.pm` | Ensembl VEP NMD plugin | recommended | last-exon check only | github.com/Ensembl/VEP_plugins (match the VEP release) | Apache-2.0 |
 | `cosmic_cgc_tsv` | Cancer Gene Census | optional | no gene-role labels in classification | COSMIC | **COSMIC licence** |
@@ -76,6 +82,9 @@ library (GENCODE v44). The test bundle uses a mini CTAT library for every RNA st
 | `known_fusions_tsv` | known oncogenic fusion pairs | optional | no single-caller known-fusion rescue | Mitelman / COSMIC Fusions / FusionGDB | COSMIC Fusions needs the COSMIC licence |
 | `cosmic_cgc_tsv` | Cancer Gene Census | optional | no gene-role fusion tiering | COSMIC | **COSMIC licence** |
 | `refflat`, `rrna_interval_list` | RNA QC files from the same GTF (GENCODE v49) | optional | RNA-seq metrics / %rRNA skipped | built by `setup.sh --full` or README Appendix A, step 8.6 | none |
+| `salmon_transcripts` | transcript FASTA from the same GTF + genome as the STAR index | optional | Salmon skipped | built once: `scripts/gtf_to_transcripts.sh` (`setup.sh --full`) | none |
+| `trust4_ref_dir` | TRUST4 references (`hg38_bcrtcr.fa`, `human_IMGT+C.fa`) | optional | TCR/BCR repertoire skipped | TRUST4 GitHub repository | none |
+| `telescope_gtf` | HERV annotation (`HERV_rmsk.hg38.v2.gtf`) | optional | HERV expression skipped | Telescope annotation repository | none |
 
 ## Minimum sets
 

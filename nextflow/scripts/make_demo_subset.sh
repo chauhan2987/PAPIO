@@ -30,29 +30,32 @@
 set -euo pipefail
 
 ###### GLOBAL VARIABLES
-DEMO_DIR=/path/to/demo_subset
+## README layout: genomics_pipeline/{nextflow,references,containers,demo,runs}; this script is in nextflow/scripts/
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+R=${ROOT}/references
+DEMO_DIR=${ROOT}/demo_subset
 PATIENT_ID=valid1
 
-## full-run inputs (DNA)
-TARGET_BED=/path/to/papio_resources/capture/S07604624/S07604624_Covered.bed
-HIGHCONF_BED=/path/to/seqc2/High-Confidence_Regions_v1.2.bed
-TRUTH_SNV=/path/to/seqc2/high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz
-TRUTH_INDEL=/path/to/seqc2/high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz
-TUMOR_BAM=/path/to/run/Result/02_markdup/valid1_T_markdup.bam      # or .cram (set REF_FASTA)
-NORMAL_BAM=/path/to/run/Result/02_markdup/valid1_N_markdup.bam
-TUMOR_R1=/path/to/demo/fastq/SRR7890945_1.fastq.gz
-TUMOR_R2=/path/to/demo/fastq/SRR7890945_2.fastq.gz
-NORMAL_R1=/path/to/demo/fastq/SRR7890874_1.fastq.gz
-NORMAL_R2=/path/to/demo/fastq/SRR7890874_2.fastq.gz
-REF_FASTA=/path/to/papio_resources/genome/GRCh38.d1.vd1.fa          # only needed for CRAM
-MSI_LIST=/path/to/papio_resources/msi/GRCh38.d1.vd1.msisensor.list   # MSIsensor-pro scan of the genome
+## full-run inputs (DNA); the full somatic run needs make_cram: true (dedup CRAMs in 0x_crams/dedup/)
+TARGET_BED=${R}/capture/S07604624/S07604624_targets.bed
+HIGHCONF_BED=${R}/truth/High-Confidence_Regions_v1.2.bed                       # Appendix B, step 9.2
+TRUTH_SNV=${R}/truth/high-confidence_sSNV_in_HC_regions_v1.2.1.vcf.gz
+TRUTH_INDEL=${R}/truth/high-confidence_sINDEL_in_HC_regions_v1.2.1.vcf.gz
+TUMOR_BAM=${ROOT}/runs/somatic_demo/Result/0x_crams/dedup/${PATIENT_ID}_T.cram    # BAM or CRAM
+NORMAL_BAM=${ROOT}/runs/somatic_demo/Result/0x_crams/dedup/${PATIENT_ID}_N.cram
+TUMOR_R1=${ROOT}/demo/fastq/SRR7890883_1.fastq.gz
+TUMOR_R2=${ROOT}/demo/fastq/SRR7890883_2.fastq.gz
+NORMAL_R1=${ROOT}/demo/fastq/SRR7890874_1.fastq.gz
+NORMAL_R2=${ROOT}/demo/fastq/SRR7890874_2.fastq.gz
+REF_FASTA=${R}/genome/GRCh38.d1.vd1.fa                                         # needed for CRAM
+MSI_LIST=${R}/msi/GRCh38.d1.vd1.msisensor.list                                 # MSIsensor-pro scan of the genome
 
-## full-run inputs (RNA)
-RNA_BAM=/path/to/run_rna/Result/01_mapping/valid1_R.Aligned.sortedByCoord.out.bam
-RNA_R1=/path/to/demo/fastq/SRR9134735_1.fastq.gz
-RNA_R2=/path/to/demo/fastq/SRR9134735_2.fastq.gz
-CTAT_GTF=/path/to/ctat/ctat_genome_lib_build_dir/ref_annot.gtf
-REF_FUSIONS=/path/to/benchmark/reference_fusions.tsv   # 2 columns: GENE5<TAB>GENE3 (header lines starting with # ignored)
+## full-run inputs (RNA); the full RNA run needs rna_cram_convert: true (STAR CRAM in 0x_crams/rna/)
+RNA_BAM=${ROOT}/runs/rna_demo/Result/0x_crams/rna/rna_R.cram
+RNA_R1=${ROOT}/demo/fastq/SRR9134735_1.fastq.gz
+RNA_R2=${ROOT}/demo/fastq/SRR9134735_2.fastq.gz
+CTAT_GTF=${R}/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.plug-n-play/ctat_genome_lib_build_dir/ref_annot.gtf
+REF_FUSIONS=${R}/truth/reference_fusions.tsv   # 2 columns: GENE5<TAB>GENE3 (header lines starting with # ignored)
 
 ## selection thresholds
 CANDIDATE_CHROMS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22"
@@ -186,10 +189,10 @@ subset_fastq "${TMP}/rna.names" "$RNA_R1" "${DEMO_DIR}/fastq/demo_R_fusiongenes_
 subset_fastq "${TMP}/rna.names" "$RNA_R2" "${DEMO_DIR}/fastq/demo_R_fusiongenes_2.fastq.gz"
 
 ## ---- 4. samplesheets (same schema as download_demo_fastq.sh) ----------------
-HEADER="patient_id,sample_type,sex,batch,flowcell,run_num,lane_num,chunk,read1,read2"
-T_ROW="${PATIENT_ID},DT,F,SEQC2_WES,DEMO_T,1,1,1,demo_T_${CHROM}_1.fastq.gz,demo_T_${CHROM}_2.fastq.gz"
-N_ROW="${PATIENT_ID},DN,F,SEQC2_WES,DEMO_N,1,1,1,demo_N_${CHROM}_1.fastq.gz,demo_N_${CHROM}_2.fastq.gz"
-R_ROW="${PATIENT_ID},RN,F,SEQC2_RNA,DEMO_R,1,1,1,demo_R_fusiongenes_1.fastq.gz,demo_R_fusiongenes_2.fastq.gz"
+HEADER="patient_id,sex,tumor_type,batch,sample_type,run_num,flowcell,lane_num,chunk,read1,read2"   # as README "Samplesheets"
+T_ROW="${PATIENT_ID},0,BRCA,IL_1,DT,DEMO_T,DEMO_T,1,001,demo_T_${CHROM}_1.fastq.gz,demo_T_${CHROM}_2.fastq.gz"
+N_ROW="${PATIENT_ID},0,BRCA,IL_1,DN,DEMO_N,DEMO_N,1,001,demo_N_${CHROM}_1.fastq.gz,demo_N_${CHROM}_2.fastq.gz"
+R_ROW="rna,0,BRCA,IL_1,RN,DEMO_R,DEMO_R,1,001,demo_R_fusiongenes_1.fastq.gz,demo_R_fusiongenes_2.fastq.gz"
 printf '%s\n%s\n%s\n' "$HEADER" "$T_ROW" "$N_ROW" > "${DEMO_DIR}/samplesheets/dna_somatic.csv"
 printf '%s\n%s\n'     "$HEADER" "$N_ROW"          > "${DEMO_DIR}/samplesheets/dna_germline.csv"
 printf '%s\n%s\n'     "$HEADER" "$R_ROW"          > "${DEMO_DIR}/samplesheets/rna_fusion.csv"

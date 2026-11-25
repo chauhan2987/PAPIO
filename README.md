@@ -80,14 +80,16 @@ genomics_pipeline/
 |   |                         #   make_test_bundle.sh, prepare_gnomad_faf.sh
 |   |-- docs/                 # RESOURCES.md (resources and compute), DEMO.md (test run and full benchmark)
 |   |-- tests/expected/       # expected outputs of the test run
-|   |                         # optional PoN builder: main_pon.nf + components_pon.nf + pon.config (Appendix A, section 3.4)
-|-- make_figures.py           # Figures 2 and 4 (Appendix B, step 15)
-|-- benchmark_plots.py        # Figures 3 and 5 (Appendix B, step 15)
-|-- trace_table.py            # Table 1, resource use (Appendix B, step 15)
-|-- fusion_truth_match.py     # fusion calls vs a published list (Appendix B, step 14)
+|   |                         # optional PoN builder: main_pon.nf + components_pon.nf + pon.config (Appendix A, step 4.5)
+|-- make_figures.py           # Figures 2 and 4 (Appendix B, step 14)
+|-- benchmark_plots.py        # Figures 3 and 5 (Appendix B, step 14)
+|-- trace_table.py            # Table 1, resource use (Appendix B, step 14)
+|-- fusion_truth_match.py     # fusion calls vs a published list (Appendix B, step 13)
 |-- make_refflat.py           # refFlat for Picard RNA metrics (Appendix A, section 8.6)
 |-- containers/               # Singularity images (*.sif)
 |-- references/               # reference data (Appendix A; same layout as setup.sh --full)
+|-- demo/                     # demonstration FASTQs + samplesheets (nextflow/scripts/download_demo_fastq.sh ../demo)
+|-- runs/                     # work_root / outdir of the runs (nextflow/params/*.yaml)
 |-- README.md
 ```
 
@@ -135,20 +137,20 @@ bash nextflow/scripts/compare_to_expected.sh check ~/papio_test/runs/test_rna/Re
 
 For a full installation, `bash nextflow/setup.sh --full <dir>` first checks that every download URL answers, then
 downloads every public GRCh38 resource of Appendix A (sections 2–8), restricts the GATK and somalier VCFs to the
-GRCh38.d1.vd1 contigs, builds the bwa-mem2, STAR, Salmon, Sequenza and MSIsensor-pro indexes and the gene, MANE CDS,
+GRCh38.d1.vd1 contigs, builds the bwa-mem2, STAR, Sequenza and MSIsensor-pro indexes, the Salmon transcript FASTA and the gene, MANE CDS,
 chromosome-arm, reportable-gene coverage, refFlat and rRNA files, fetches the somalier ancestry, TRUST4, HERV (Telescope)
 and refPhi files, and writes params files under `<dir>/params` with the paths filled in (folder layout of
 `nextflow/params/`). With `--kit <ID> --kit-regions <ID>_Regions.bed --kit-probes <ID>_Covered.bed` (the SureDesign
 design BEDs) it also builds the capture-kit files of sections 4 and 5.2: interval lists, calling shards, call regions
 and gCNV intervals; with `--cosmic` it downloads and prepares COSMIC v104 (section 7.4) with the login in
 `COSMIC_EMAIL` / `COSMIC_PASSWORD`, or asks for it. About 250 GB are downloaded; the bwa-mem2 index needs 64 GB of RAM.
-A re-run resumes where it stopped. `--no-fusioncatcher`, `--no-annotsv`, `--no-gnomad` and `--no-salmon` skip the large
-optional resources (the matching params are then set to null), `--check-urls` only tests the URLs, and
+A re-run resumes where it stopped. `--no-fusioncatcher`, `--no-annotsv` and `--no-gnomad` skip the large optional
+resources and `--no-salmon` the Salmon transcript FASTA (the matching params are then set to null), `--check-urls` only tests the URLs, and
 `PAPIO_SETUP_CONF=<file>` can point the URLs at a local mirror. Optional resources that are absent (CNVkit panel of
 normals, VerifyBamID2, an in-house Mutect2 panel of normals from `main_pon.nf`) are set to null in the params files.
 The reportable-gene list is the example of Appendix A, step 6.2; edit `<dir>/references/annotation/reportable_genes.txt`
 and re-run setup to rebuild its coverage BED. With the Salmon, TRUST4 and HERV resources set, the RNA arm also runs
-Salmon, TRUST4 and Telescope; set `salmon_index`, `trust4_ref_dir` or `telescope_gtf` to null to skip them.
+Salmon, TRUST4 and Telescope; set `salmon_transcripts`, `trust4_ref_dir` or `telescope_gtf` to null to skip them.
 `bash nextflow/scripts/make_reference_manifest.sh
 <params.yaml> <out.tsv>` records the version and checksum of each resource used in a run.
 
@@ -231,7 +233,8 @@ patient_id,sex,tumor_type,batch,sample_type,run_num,flowcell,lane_num,chunk,read
 rna,0,BRCA,IL_1,RN,SRR9134735,SRR9134735,1,001,SRR9134735_1.fastq.gz,SRR9134735_2.fastq.gz
 ```
 
-Use the same `patient_id` for a patient's DNA and RNA so the results can be joined.
+When DNA and RNA come from the same patient, give them the same `patient_id` so the results can be joined; the
+demonstration RNA is a separate study, so it has its own (`rna`).
 
 ---
 
@@ -254,8 +257,8 @@ write_manifest:         true
 preflight_references:   true            # check references before any job is submitted
 
 # ---------------- Input / output ----------------
-pipeline_root:          /home/<user>/genomics_pipeline
-container_dir:          /home/<user>/genomics_pipeline/containers
+pipeline_root:          ${projectDir}                  # the nextflow/ folder (holds main.nf)
+container_dir:          ${projectDir}/../containers
 fastq_root:             /scratch/<user>/fastq
 work_root:              /scratch/<user>/work_demo
 outdir:                 /home/<user>/Result_demo
@@ -308,7 +311,7 @@ somalier_ancestry_labels: ${projectDir}/../references/somalier/ancestry-labels-1
 somalier_1kg_dir:       ${projectDir}/../references/somalier/1kg-somalier # extracted 1kg-somalier/ directory
 
 verifybamid_db:         null
-coverage_report_bed:    ${projectDir}/../references/annotation/reportable_genes_MANE_CDS.bed
+coverage_report_bed:    ${projectDir}/../references/annotation/ensembl115_reportable_genes_MANE_CDS.bed
 
 # ---------------- Annotation (both DNA arms) ----------------
 vep_cache_dir:          ${projectDir}/../references/vep_cache
@@ -319,27 +322,27 @@ annotsv_dir:            ${projectDir}/../references/annotsv
 cosmic_cgc_tsv:         ${projectDir}/../references/cosmic/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz
 
 # ---------------- Somatic arm (analysis: somatic) ----------------
-scatter_intervals:      ${projectDir}/../references/capture/S07604624/scatter_24_pad100
-# scatter_intervals:    ${projectDir}/../references/capture/S31285117/scatter_24_pad100   # own data (V7)
+scatter_intervals:      ${projectDir}/../references/capture/S07604624/S07604624_scatter_24_pad100
+# scatter_intervals:    ${projectDir}/../references/capture/S31285117/S31285117_scatter_24_pad100   # own data (V7)
 germline_resource:      ${projectDir}/../references/gatk/af-only-gnomad.hg38.vcf.gz
 pileup_variants:        ${projectDir}/../references/gatk/small_exac_common_3.hg38.vcf.gz
 # choose either the 1000G PoN or your own PoN
 panel_of_normals:       ${projectDir}/../references/gatk/1000g_pon.hg38.vcf.gz
-# panel_of_normals:     ${projectDir}/../references/capture/S31285117/inhouse_pon.vcf.gz   # optional: main_pon.nf (section 3.4)
+# panel_of_normals:     ${projectDir}/../references/capture/S31285117/S31285117_inhouse_pon.vcf.gz   # optional: main_pon.nf (Appendix A, step 4.5)
 orientation_bias:       true
 consensus_backbone:     mutect2   # mutect2: vote on Mutect2 PASS calls; union: vote over all callers (Mutect2 is one vote)
-cnvkit_pon:             null      # or ${projectDir}/../references/capture/<KIT>/cnvkit_pon.cnn (same kit)
+cnvkit_pon:             null      # or ${projectDir}/../references/capture/<KIT>/<KIT>_cnvkit_pon.cnn (same kit)
 msisensor_list:         ${projectDir}/../references/msi/GRCh38.d1.vd1.msisensor.list
 sequenza_gc_wiggle:     ${projectDir}/../references/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz
 gene_bed:               ${projectDir}/../references/annotation/ensembl115_genes.bed
 arm_bed:                ${projectDir}/../references/annotation/GRCh38_arms.bed
-cosmic_vcf:             ${projectDir}/../references/cosmic/cosmic_genome_screens_v104_chr_dedup.vcf.gz
+cosmic_vcf:             ${projectDir}/../references/cosmic/Cosmic_GenomeScreensMutant_Normal_v104_GRCh38.chr_dedup.vcf.gz
 tmb_coding_bed:         ${projectDir}/../references/annotation/ensembl115_MANE_CDS.bed
 germline_on_normals:    false     # true = germline report for each matched normal
 
 # ---------------- Germline arm (analysis: germline) ----------------
-germline_scatter_intervals: ${projectDir}/../references/capture/S07604624/scatter_150_pad100
-# germline_scatter_intervals: ${projectDir}/../references/capture/S31285117/scatter_150_pad100   # own data (V7)
+germline_scatter_intervals: ${projectDir}/../references/capture/S07604624/S07604624_scatter_150_pad100
+# germline_scatter_intervals: ${projectDir}/../references/capture/S31285117/S31285117_scatter_150_pad100   # own data (V7)
 germline_caller:        haplotypecaller   # haplotypecaller | deepvariant
 germline_filter:        nv                # nv (any sample number NVScoreVariants) | none (unfiltered GenotypeGVCFs) | vqsr (≥ 30 samples)
 vqsr_min_samples:       30                # minimum samples before VQSR is allowed (else use 'nv')
@@ -352,10 +355,10 @@ thousandg_snps:         ${projectDir}/../references/gatk/1000G_phase1.snps.high_
 germline_report_genes:  ${projectDir}/../references/annotation/reportable_genes.txt
 # gCNV inputs: only with run_gcnv: true and ≥ 30 normals of one kit (not used for the demonstration);
 # the paths below are for own data (SureSelect V7, S31285117)
-# contig_ploidy_priors:     ${projectDir}/../references/capture/S31285117/gcnv/contig_ploidy_priors.tsv
-# preprocessed_intervals:   ${projectDir}/../references/capture/S31285117/gcnv/preprocessed_intervals.interval_list
-# gcnv_scatter_intervals:   ${projectDir}/../references/capture/S31285117/gcnv/scatter
-# gcnv_annotated_intervals: ${projectDir}/../references/capture/S31285117/gcnv/annotated_intervals.tsv
+# contig_ploidy_priors:     ${projectDir}/../references/annotation/GRCh38_contig_ploidy_priors.tsv
+# preprocessed_intervals:   ${projectDir}/../references/capture/S31285117/gcnv/S31285117_preprocessed_intervals.interval_list
+# gcnv_scatter_intervals:   ${projectDir}/../references/capture/S31285117/gcnv/S31285117_scatter_24_pad250
+# gcnv_annotated_intervals: ${projectDir}/../references/capture/S31285117/gcnv/S31285117_annotated_intervals.tsv
 
 run_optitype:           true              # HLA class I typing (OptiType)
 
@@ -363,7 +366,7 @@ run_optitype:           true              # HLA class I typing (OptiType)
 rna_use_ctat_reference: false
 gtf:                    ${projectDir}/../references/gencode/gencode.v49.annotation.gtf
 star_index:             ${projectDir}/../references/star/StarIndex_gencode_v49
-salmon_index:           ${projectDir}/../references/salmon/SalmonIndex_gencode_v49
+salmon_transcripts:     ${projectDir}/../references/star/gencode.v49.annotation.transcripts.fa   # Salmon (Appendix A, step 8.7)
 refflat:                ${projectDir}/../references/rna_qc/gencode.v49.refFlat
 rrna_interval_list:     ${projectDir}/../references/rna_qc/gencode.v49.rrna.interval_list
 rna_strandedness:       auto
@@ -371,7 +374,7 @@ ctat_lib:               ${projectDir}/../references/ctat/GRCh38_gencode_v44_CTAT
 arriba_blacklist:       ${projectDir}/../references/arriba/blacklist_hg38_GRCh38_v2.5.1.tsv.gz
 arriba_known_fusions:   ${projectDir}/../references/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz
 arriba_protein_domains: ${projectDir}/../references/arriba/protein_domains_hg38_GRCh38_v2.5.1.gff3
-known_fusions_tsv:      ${projectDir}/../references/fusion/known_fusions.tsv
+known_fusions_tsv:      ${projectDir}/../references/fusion/known_fusions_hg38_GRCh38_v2.5.1.tsv
 use_fusioncatcher:      true
 fusioncatcher_db:       ${projectDir}/../references/fusioncatcher/human_v102
 
@@ -397,6 +400,19 @@ For the other arms, copy the file and change only:
 ---
 Ready-made params files for each arm, and a sensitive somatic preset (`params_somatic_sensitive.yaml`), are in
 `nextflow/params/`.
+
+### Checking a library for inline UMIs
+
+Look at the base composition of the first 15 cycles of R1 and R2, for tumor and normal, in several patients.
+A random block followed by a fixed block means an inline UMI. In the RCC cohort: 3 random bases, 2 fixed, then genome,
+which is `umi_read_structure: 3M2S+T` (3 bases UMI, skip 2, rest template).
+
+```bash
+FQ=<sample>_R1.fq.gz        # any R1 or R2 file of the library
+zcat $FQ | head -40000 | awk 'NR%4==2 {n++; for (i=1;i<=15;i++) c[i, substr($0,i,1)]++}
+  END {for (i=1;i<=15;i++) printf "pos%2d  A:%5.1f  C:%5.1f  G:%5.1f  T:%5.1f\n", i,
+       100*c[i,"A"]/n, 100*c[i,"C"]/n, 100*c[i,"G"]/n, 100*c[i,"T"]/n}'
+```
 
 ## Running PAPIO
 
@@ -522,7 +538,7 @@ annotates their calls (VEP; ClinVar and gnomAD FAF when given, no COSMIC).
 | Stage | Processes | Kind |
 |---|---|---|
 | 1 mapping | `STAR_ALIGN` (two-pass unless `star_twopass: false`, chimeric output) | required |
-| | `SALMON_QUANT` | resource (`salmon_index`) |
+| | `SALMON_QUANT` (on STAR's transcriptome alignments) | resource (`salmon_transcripts`) |
 | | `CRAM_CONVERT` | toggle (`rna_cram_convert`, off) |
 | 3 metrics | `RNASEQ_METRICS` (Picard CollectRnaSeqMetrics; strandedness inferred from the STAR gene counts when `rna_strandedness: auto`); `SAMTOOLS_STATS`; `MULTIQC` | required |
 | 5 variant calling | `ARRIBA` | toggle (`use_arriba`, on) |
@@ -616,7 +632,7 @@ Variants without coding or splice-site impact and without other evidence are lab
 and are not benign calls. LIKELY_BENIGN and BENIGN_OR_LIKELY need evidence (population frequency or ClinVar).
 
 **Population frequency.** With `gnomad_faf_vcf` set, the population frequency used for benign calls is the gnomAD v4.1
-grpmax filtering allele frequency (`fafmax_faf95_max_joint`), the field ClinGen recommends for the ACMG/AMP BA1 and BS1
+grpmax filtering allele frequency (`fafmax_faf95_max_j`), the field ClinGen recommends for the ACMG/AMP BA1 and BS1
 criteria (file and download in Appendix A, step 7.6). Without it, VEP's `MAX_AF` is used, which includes
 founder and small populations and so over-calls common variants. The column header names the source. The GATK
 `af-only-gnomad` file is not used here: it holds only the global AF, which misses variants common in one population.
@@ -660,7 +676,7 @@ optional steps appear only when the step runs.
 |-- 00_manifest/<analysis>/            preflight_references.txt, run_manifest.tsv (write_manifest)
 |-- 01_mapping/rna_fusion/
 |   |-- star/                          <S>.Log.final.out, .SJ.out.tab, .ReadsPerGene.out.tab, .Chimeric.out.junction
-|   |-- salmon/                        Salmon quantification (salmon_index)
+|   |-- salmon/                        <S>/quant.sf, Salmon logs and library type (salmon_transcripts)
 |-- 02_markdup/                        <S>_dup_metrics.json (markdup), <S>_dup_metrics.txt (umi_markdup),
 |                                      <S>_family_sizes.txt (umi_consensus)
 |-- 03_metrics/
@@ -731,7 +747,7 @@ normals' germline results are written in the `somatic/` folders under the normal
 |---|---|---|
 | Exit 140 | LSF run-time limit | Raise `time` for that process in an extra config (see Running PAPIO) |
 | Exit 255 in `PREPROCESS_AND_ALIGN_DNA` | fastp stopped on a damaged FASTQ (bwa-mem2 log ends normally) | `gzip -t` both FASTQs; download again (`prefetch` → `vdb-validate` → `fasterq-dump`) |
-| `0 total baseline variants` in vcfeval | Truth FILTER is not PASS and `--all-records` was not used | Set FILTER to PASS in the truth VCF (Appendix B, step 12.1, `awk '{$7="PASS"}'`), or run vcfeval with --all-records |
+| `0 total baseline variants` in vcfeval | Truth FILTER is not PASS and `--all-records` was not used | Set FILTER to PASS in the truth VCF (Appendix B, step 11.1, `awk '{$7="PASS"}'`), or run vcfeval with --all-records |
 | Many LOWSUPPORT calls | Tumor depth below `filter_min_tumor_dp` (20), or `call_regions_gz` narrower than the Mutect2 shards | Check coverage; use the padded `call_regions_gz` (Appendix A, step 4.4) |
 | `command not found` (or `Rscript`/`awk` cannot open) for a `bin/` script such as `classify_variants.sh` | `nextflow/bin/` missing, scripts not executable (copied without permissions), or the pipeline folder not visible inside Singularity | Use `git clone` (keeps permissions) or `chmod +x nextflow/bin/*`; keep the pipeline under a path in `bind_paths` |
 | `Unknown configuration profile: local` | `conf/` folder missing next to `nextflow.config` | Copy `conf/` from the release into `nextflow/` |
@@ -761,7 +777,7 @@ SX="singularity exec -B $P"
 BCF="$SX $E/bwa_samtools_fastp_fgbio_bcftools.sif"
 GATK="$SX $E/gatk.sif"
 mkdir -p $U $R/{genome/bwa_mem2,gatk,somalier,clinvar,gnomad,annotation,vep_cache,vep_plugins,cosmic,annotsv} \
-         $R/{sequenza,msi,capture,gencode,star,salmon,rna_qc,ctat,arriba,fusion,fusioncatcher} \
+         $R/{sequenza,msi,capture,gencode,star,rna_qc,ctat,arriba,fusion,fusioncatcher} \
          $R/{trust4,telescope,refphi,truth} $E
 ```
 
@@ -774,11 +790,11 @@ references/
 |-- genome/                 GRCh38.d1.vd1.fa, .fa.fai, .dict; bwa_mem2/ (index)
 |-- gatk/                   GATK resource bundle VCFs restricted to the reference contigs (upstream file names)
 |-- somalier/  clinvar/  gnomad/  vep_cache/  vep_plugins/  cosmic/  annotsv/
-|-- annotation/             gene, MANE CDS, chromosome-arm and reportable-gene files
+|-- annotation/             gene, MANE CDS, chromosome-arm and reportable-gene files, gCNV contig-ploidy priors
 |-- sequenza/  msi/
 |-- capture/<KIT>/          <KIT>_targets.bed, <KIT>_baits.bed, their .interval_list, <KIT>_targets_pad100.bed.gz,
-|                           scatter_24_pad100/, scatter_150_pad100/, gcnv/; optional cnvkit_pon.cnn, inhouse_pon.vcf.gz
-|-- gencode/  star/  salmon/  rna_qc/  ctat/  arriba/  fusion/  fusioncatcher/  trust4/  telescope/  refphi/
+|                           <KIT>_scatter_24_pad100/, <KIT>_scatter_150_pad100/, gcnv/; optional <KIT>_cnvkit_pon.cnn, <KIT>_inhouse_pon.vcf.gz
+|-- gencode/  star/  rna_qc/  ctat/  arriba/  fusion/  fusioncatcher/  trust4/  telescope/  refphi/
 `-- truth/                  benchmark truth sets (Appendix B)
 ```
 
@@ -998,54 +1014,6 @@ $GATK gatk ValidateVariants -V $F -R $REF --validation-type-to-exclude ALL
 
 ---
 
-#### 3.4 In-house Mutect2 panel of normals (optional) [Generate]
-
-The public `1000g_pon` above is the panel of normals used throughout this protocol. A panel built from your own
-normals on the same capture kit can also remove recurrent artifacts specific to that kit. `main_pon.nf` builds a panel
-from final normal BAMs: it runs Mutect2 tumor-only on each normal over `scatter_intervals`, then
-GenomicsDBImport and CreateSomaticPanelOfNormals with `germline_resource`.
-
-Samplesheet (normal BAMs only):
-
-```
-sample_id,bam,bai
-S001_N,/path/S001_N.bam,/path/S001_N.bam.bai
-S002_N,/path/S002_N.bam,/path/S002_N.bam.bai
-```
-
-`params_pon.yaml` (same conventions as `params_demo.yaml` in "Parameter file"; V7 shards shown):
-
-```yaml
-pon_samplesheet:    /home/<user>/normals_pon.csv
-container_dir:      /home/<user>/genomics_pipeline/containers
-work_root:          /scratch/<user>/work_pon
-outdir:             /home/<user>/Result_pon
-bind_paths:         [/home/<user>, /scratch/<user>]
-ref_fasta:          ${projectDir}/../references/genome/GRCh38.d1.vd1.fa
-ref_fai:            ${projectDir}/../references/genome/GRCh38.d1.vd1.fa.fai
-ref_dict:           ${projectDir}/../references/genome/GRCh38.d1.vd1.dict
-scatter_intervals:  ${projectDir}/../references/capture/S31285117/scatter_24_pad100
-germline_resource:  ${projectDir}/../references/gatk/af-only-gnomad.hg38.vcf.gz
-lsf_queue_short:    short
-lsf_queue_medium:   medium
-lsf_queue_high:     long
-lsf_queue_long:     long
-lsf_project:        null
-```
-
-```bash
-nextflow run ${HOME}/genomics_pipeline/nextflow/main_pon.nf -c ${HOME}/genomics_pipeline/nextflow/pon.config \
- -params-file params_pon.yaml -profile production
-```
-
-- The panel is written to `<outdir>/00_reference/final_pon/panel_of_normals.vcf.gz` (with `.tbi`). Copy both to
-  `references/capture/<KIT>/` as `inhouse_pon.vcf.gz` and `inhouse_pon.vcf.gz.tbi`, then set `panel_of_normals` to that file.
-- This is a Mutect2 (somatic) panel of normals like `1000g_pon`, but it is valid only for the kit it was built on,
-  so it is kept with that kit's files.
-- The workflow is optional, is not part of this protocol, and was not used for any result in the paper.
-- The panel and the per-normal VCFs in `<outdir>/00_reference/pon/per_normal/` are derived from patients' germline
-  data: do not commit or share them without approval.
-
 ---
 
 ### 4. Capture intervals
@@ -1101,7 +1069,7 @@ Targets ± 100 bp; overlapping padded targets are merged; no target is split bet
 ```bash
 for n in 24 150; do
   $GATK gatk SplitIntervals -R $REF -L $K/${ID}_targets.interval_list --interval-padding 100 --interval-merging-rule ALL \
-    --subdivision-mode BALANCING_WITHOUT_INTERVAL_SUBDIVISION --scatter-count $n -O $K/scatter_${n}_pad100
+    --subdivision-mode BALANCING_WITHOUT_INTERVAL_SUBDIVISION --scatter-count $n -O $K/${ID}_scatter_${n}_pad100
 done
 ```
 
@@ -1110,14 +1078,14 @@ done
 Built from the somatic shards, so all callers see the same territory.
 
 ```bash
-grep -hv '^@' $K/scatter_24_pad100/*.interval_list \
+grep -hv '^@' $K/${ID}_scatter_24_pad100/*.interval_list \
   | awk 'BEGIN{OFS="\t"} {print $1, $2-1, $3}' | LC_ALL=C sort -k1,1 -k2,2n \
   | awk 'BEGIN{OFS="\t"} {if($1==c && $2<=e){if($3>e)e=$3} else {if(c!="")print c,s,e; c=$1;s=$2;e=$3}} END{if(c!="")print c,s,e}' \
   > $K/${ID}_targets_pad100.bed
 $BCF bash -c "bgzip -f $K/${ID}_targets_pad100.bed && tabix -f -p bed $K/${ID}_targets_pad100.bed.gz"
 ```
 
-Params YAML entries (both kits use the same names under their own folder):
+Params YAML entries (the same names for every kit, under its own folder):
 
 | Parameter | File under `references/capture/<KIT>/` |
 |---|---|
@@ -1125,8 +1093,58 @@ Params YAML entries (both kits use the same names under their own folder):
 | `call_regions_gz` | `<KIT>_targets_pad100.bed.gz` |
 | `bait_interval_list` | `<KIT>_baits.interval_list` |
 | `target_interval_list` | `<KIT>_targets.interval_list` |
-| `scatter_intervals` | `scatter_24_pad100` |
-| `germline_scatter_intervals` | `scatter_150_pad100` |
+| `scatter_intervals` | `<KIT>_scatter_24_pad100` |
+| `germline_scatter_intervals` | `<KIT>_scatter_150_pad100` |
+
+
+#### 4.5 In-house Mutect2 panel of normals (optional) [Generate]
+
+Run this after steps 4.1-4.4 for the kit, once its normals have been through the pipeline (it uses their final
+BAMs). The public `1000g_pon` (step 3.3) is the panel of normals used throughout this protocol. A panel built from your own
+normals on the same capture kit can also remove recurrent artifacts specific to that kit. `main_pon.nf` builds a panel
+from final normal BAMs: it runs Mutect2 tumor-only on each normal over `scatter_intervals`, then
+GenomicsDBImport and CreateSomaticPanelOfNormals with `germline_resource`.
+
+Samplesheet (normal BAMs only):
+
+```
+sample_id,bam,bai
+S001_N,/path/S001_N.bam,/path/S001_N.bam.bai
+S002_N,/path/S002_N.bam,/path/S002_N.bam.bai
+```
+
+`params_pon.yaml` (same conventions as `params_demo.yaml` in "Parameter file"; V7 shards shown):
+
+```yaml
+pon_samplesheet:    /home/<user>/normals_pon.csv
+container_dir:      /home/<user>/genomics_pipeline/containers
+work_root:          /scratch/<user>/work_pon
+outdir:             /home/<user>/Result_pon
+bind_paths:         [/home/<user>, /scratch/<user>]
+ref_fasta:          ${projectDir}/../references/genome/GRCh38.d1.vd1.fa
+ref_fai:            ${projectDir}/../references/genome/GRCh38.d1.vd1.fa.fai
+ref_dict:           ${projectDir}/../references/genome/GRCh38.d1.vd1.dict
+scatter_intervals:  ${projectDir}/../references/capture/S31285117/S31285117_scatter_24_pad100
+germline_resource:  ${projectDir}/../references/gatk/af-only-gnomad.hg38.vcf.gz
+lsf_queue_short:    short
+lsf_queue_medium:   medium
+lsf_queue_high:     long
+lsf_queue_long:     long
+lsf_project:        null
+```
+
+```bash
+nextflow run ${HOME}/genomics_pipeline/nextflow/main_pon.nf -c ${HOME}/genomics_pipeline/nextflow/pon.config \
+ -params-file params_pon.yaml -profile production
+```
+
+- The panel is written to `<outdir>/00_reference/final_pon/panel_of_normals.vcf.gz` (with `.tbi`). Copy both to
+  `references/capture/<KIT>/` as `<KIT>_inhouse_pon.vcf.gz` and `<KIT>_inhouse_pon.vcf.gz.tbi`, then set `panel_of_normals` to that file.
+- This is a Mutect2 (somatic) panel of normals like `1000g_pon`, but it is valid only for the kit it was built on,
+  so it is kept with that kit's files.
+- The workflow is optional, is not part of this protocol, and was not used for any result in the paper.
+- The panel and the per-normal VCFs in `<outdir>/00_reference/pon/per_normal/` are derived from patients' germline
+  data: do not commit or share them without approval.
 
 ---
 
@@ -1143,24 +1161,28 @@ $SX $E/msisensorpro.sif msisensor-pro scan -d $REF -o $R/msi/GRCh38.d1.vd1.msise
 
 ```bash
 G=$K/gcnv              # K and ID from section 4 (demonstration data has < 30 normals, so gCNV is not needed)
-mkdir -p $G/scatter
+mkdir -p $G/${ID}_scatter_24_pad250
 
 $GATK gatk PreprocessIntervals -R $REF -L $K/${ID}_targets.interval_list \
-  --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O $G/preprocessed_intervals.interval_list
-$GATK gatk AnnotateIntervals -R $REF -L $G/preprocessed_intervals.interval_list \
-  --interval-merging-rule OVERLAPPING_ONLY -O $G/annotated_intervals.tsv
-$GATK gatk IntervalListTools --INPUT $G/preprocessed_intervals.interval_list \
-  --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT $G/scatter_tmp
-i=0; for d in $G/scatter_tmp/temp_*; do i=$((i+1)); printf -v n '%04d' $i; cp "$d/scattered.interval_list" "$G/scatter/shard_${n}.interval_list"; done
-rm -rf $G/scatter_tmp
+  --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O $G/${ID}_preprocessed_intervals.interval_list
+$GATK gatk AnnotateIntervals -R $REF -L $G/${ID}_preprocessed_intervals.interval_list \
+  --interval-merging-rule OVERLAPPING_ONLY -O $G/${ID}_annotated_intervals.tsv
+$GATK gatk IntervalListTools --INPUT $G/${ID}_preprocessed_intervals.interval_list \
+  --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT $U/${ID}_gcnv_scatter_tmp
+i=0; for d in $U/${ID}_gcnv_scatter_tmp/temp_*; do i=$((i+1)); printf -v n '%04d' $i; cp "$d/scattered.interval_list" "$G/${ID}_scatter_24_pad250/shard_${n}.interval_list"; done
+rm -rf $U/${ID}_gcnv_scatter_tmp
+```
 
+Contig-ploidy priors (expected copies of each chromosome) depend on the genome, not the kit; written once for all kits:
+
+```bash
 awk 'BEGIN{OFS="\t"; print "CONTIG_NAME","PLOIDY_PRIOR_0","PLOIDY_PRIOR_1","PLOIDY_PRIOR_2","PLOIDY_PRIOR_3"
   for (i=1;i<=22;i++) print "chr"i,"0.01","0.01","0.97","0.01"
-  print "chrX","0.01","0.49","0.49","0.01"; print "chrY","0.495","0.495","0.01","0.01"}' > $G/contig_ploidy_priors.tsv
+  print "chrX","0.01","0.49","0.49","0.01"; print "chrY","0.495","0.495","0.01","0.01"}' > $R/annotation/GRCh38_contig_ploidy_priors.tsv
 ```
 
 CNVkit runs against the matched normal (`cnvkit_pon: null`); a panel of normals built later for a kit goes to
-`references/capture/<KIT>/cnvkit_pon.cnn`.
+`references/capture/<KIT>/<KIT>_cnvkit_pon.cnn`.
 
 ---
 
@@ -1226,7 +1248,7 @@ zcat $GTF | awk -F'\t' -v list=$R/annotation/reportable_genes.txt 'BEGIN{OFS="\t
   $3=="CDS" && $9 ~ /tag "MANE_Select"/ && match($9, /gene_name "[^"]+"/) {
     g=substr($9,RSTART+11,RLENGTH-12); c=$1; if (c=="MT") c="M"
     if (c ~ /^([0-9]+|X|Y|M)$/ && (toupper(g) in G)) print "chr" c, $4-1, $5, g }' \
-  | LC_ALL=C sort -k1,1 -k2,2n -u > $R/annotation/reportable_genes_MANE_CDS.bed
+  | LC_ALL=C sort -k1,1 -k2,2n -u > $R/annotation/ensembl115_reportable_genes_MANE_CDS.bed
 ```
 
 #### 6.3 Chromosome-arm BED [Download + Generate]
@@ -1300,8 +1322,8 @@ tar -xf Cosmic_GenomeScreensMutant_Normal_Vcf_v104_GRCh38.tar  # → Cosmic_Geno
 # chr names, sorted, transcript-level duplicate rows collapsed to one record per variant
 $BCF bash -c "set -euo pipefail
   bcftools annotate --rename-chrs $R/clinvar/chr_rename.txt Cosmic_GenomeScreensMutant_Normal_v104_GRCh38.vcf.gz -Ou \
-    | bcftools sort -T $U -Ou | bcftools norm -d exact -Oz -o $R/cosmic/cosmic_genome_screens_v104_chr_dedup.vcf.gz
-  tabix -f -p vcf $R/cosmic/cosmic_genome_screens_v104_chr_dedup.vcf.gz"
+    | bcftools sort -T $U -Ou | bcftools norm -d exact -Oz -o $R/cosmic/Cosmic_GenomeScreensMutant_Normal_v104_GRCh38.chr_dedup.vcf.gz
+  tabix -f -p vcf $R/cosmic/Cosmic_GenomeScreensMutant_Normal_v104_GRCh38.chr_dedup.vcf.gz"
 cd $P
 ```
 
@@ -1316,23 +1338,25 @@ ls $R/annotsv
 #### 7.6 gnomAD v4.1 filtering allele frequency (`gnomad_faf_vcf`) [Download]
 
 The population frequency used for benign calls (BA1, BS1) in variant classification is the gnomAD v4.1 joint
-(exome + genome) grpmax filtering allele frequency, INFO field `fafmax_faf95_max_joint`. A size-reduced copy of the
+(exome + genome) grpmax filtering allele frequency: INFO field `fafmax_faf95_max_joint` in gnomAD's own VCFs,
+`fafmax_faf95_max_j` in the file below (`_e` exome, `_g` genome, `_j` joint), the name the pipeline reads. A size-reduced copy of the
 gnomAD v4.1 joint sites VCF, restricted to MANE transcript regions and to the population-frequency fields (including
 the filtering allele frequencies) and prepared for VEP, is published by the Catalan Institute of Oncology on Zenodo
-(DOI 10.5281/zenodo.23531816, CC BY 4.0; 33.6 GB). Check that the header lists `fafmax_faf95_max_joint`.
+(DOI 10.5281/zenodo.23531816, CC BY 4.0; 33.6 GB). Check that the header lists `fafmax_faf95_max_j`.
 
 ```bash
 cd $R/gnomad
 wget -c https://zenodo.org/records/23531816/files/variantsGnomADv4.1Joint.vcf.bgz
 wget -c https://zenodo.org/records/23531816/files/variantsGnomADv4.1Joint.vcf.bgz.tbi
 md5sum variantsGnomADv4.1Joint.vcf.bgz      # 92f6f7c9f7f375ad64b171de6fa7d2b0
-$BCF bcftools view -h variantsGnomADv4.1Joint.vcf.bgz | grep '^##INFO=<ID=fafmax_faf95_max_joint,'
+$BCF bcftools view -h variantsGnomADv4.1Joint.vcf.bgz | grep '^##INFO=<ID=fafmax_faf95_max_j,'
 cd $P
 ```
 
 Variants outside MANE transcript regions get no gnomAD frequency from this file. To cover every PASS site instead,
 build the file from the official per-chromosome gnomAD files with `scripts/prepare_gnomad_faf.sh <out_dir> [threads]`
-(about 900 GB downloaded one chromosome at a time; output `gnomad.joint.v4.1.faf95.vcf.gz`).
+(about 900 GB downloaded one chromosome at a time; output `gnomad.joint.v4.1.faf95.vcf.gz`, with the field renamed
+`fafmax_faf95_max_j`).
 
 #### 7.7 VEP NMD plugin (`vep_plugins_dir`) [Download]
 
@@ -1378,7 +1402,7 @@ cp $U/arriba_v2.5.1/database/blacklist_hg38_GRCh38_v2.5.1.tsv.gz \
    $U/arriba_v2.5.1/database/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz \
    $U/arriba_v2.5.1/database/protein_domains_hg38_GRCh38_v2.5.1.gff3 $R/arriba/
 # known_fusions_tsv: uncompressed copy for the fusion annotation step
-zcat $R/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz > $R/fusion/known_fusions.tsv
+zcat $R/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz > $R/fusion/known_fusions_hg38_GRCh38_v2.5.1.tsv
 ```
 
 #### 8.4 FusionCatcher database (only with `use_fusioncatcher: true`) [Download]
@@ -1438,52 +1462,24 @@ $SX $E/bcftool_cnvkit_vep_snpeff.sif python3 $P/make_refflat.py $RGTF $R/rna_qc/
 } > $R/rna_qc/gencode.v49.rrna.interval_list
 ```
 
-#### 8.7 Optional Salmon quantification of RNA [Download + Generate]
+#### 8.7 Optional Salmon quantification of RNA: transcript FASTA [Generate]
 
-Pull Salmon 1.10.3 container. Don't use Rust version as it is new and needs maturity
-
-```bash
-cd $E
-singularity pull $E/salmon.sif docker://quay.io/biocontainers/salmon:1.10.3--h6dccd9a_2
-cd $P
-```
-
-Download GENCODE v49 transcripts
+Salmon (container `salmon.sif`, Salmon 1.10.3) quantifies STAR's transcriptome alignments
+(`Aligned.toTranscriptome.out.bam`) in alignment mode, as in nf-core/rnaseq: one pass over the reads and no Salmon
+index. It needs the transcript sequences of the GTF the STAR index was built with (step 8.5): every transcript in STAR's
+BAM must be in this FASTA, or Salmon stops. `nextflow/scripts/gtf_to_transcripts.sh` joins the exons of each transcript
+(minus strand reverse-complemented; names = `transcript_id`):
 
 ```bash
-wget -c -P $U https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.transcripts.fa.gz
+cp $P/nextflow/scripts/gtf_to_transcripts.sh $U/
+TMPDIR=$U $BCF bash $U/gtf_to_transcripts.sh --gtf $R/gencode/gencode.v49.annotation.gtf --fasta $REF \
+    --out $R/star/gencode.v49.annotation.transcripts.fa
+grep -c '^>' $R/star/gencode.v49.annotation.transcripts.fa        # one sequence per GENCODE v49 transcript
 ```
 
-gzip the genome (takes a while)
-
-```bash
-gzip -c $REF > $U/GRCh38.d1.vd1.fa.gz
-```
-
-Prepare decoy and gentrome (Caution: transcript must be before genome)
-
-```bash
-# decoys: only unplaced, unlocalized, viral and EBV sequences
-grep "^>" $REF | cut -d " " -f 1 | sed 's/>//' | grep -v "^chr[0-9XYM]*$" > $R/salmon/decoys.txt
-
-# gentrome (transcripts must come first)
-cat $U/gencode.v49.transcripts.fa.gz $U/GRCh38.d1.vd1.fa.gz > $R/salmon/gentrome_v49.fa.gz
-```
-
-Build Salmon index with 31 kmer size (-k 31 is suitable for 150 bp reads) and 16 cores (-p 16)
-
-```bash
-SALMON="$SX $E/salmon.sif"
-
-$SALMON salmon index \
-    -t $R/salmon/gentrome_v49.fa.gz \
-    -d $R/salmon/decoys.txt \
-    --gencode \
-    -k 31 \
-    -p 16 \
-    -i $R/salmon/SalmonIndex_gencode_v49
-rm -f $R/salmon/gentrome_v49.fa.gz          # only needed to build the index
-```
+Set `salmon_transcripts` to this file. With `rna_use_ctat_reference: true` (STAR on the CTAT library), build it from
+`ctat_genome_lib_build_dir/ref_annot.gtf` and `ref_genome.fa` instead. `check_installation.sh` tests that the FASTA holds
+every transcript of the GTF in use.
 
 #### 8.8 TRUST4 TCR/BCR references [Download]
 
@@ -1506,35 +1502,22 @@ curl -fsSL --retry 2 https://raw.githubusercontent.com/humengying0907/InstaPrism
 ```
 ---
 
-### 9. Library check before the first run: inline UMIs
-
-Look at the base composition of the first 15 cycles of R1 and R2, for tumor and normal, in several patients.
-A random block followed by a fixed block means an inline UMI. In the RCC cohort: 3 random bases, 2 fixed, then genome,
-which is `umi_read_structure: 3M2S+T` (3 bases UMI, skip 2, rest template).
-
-```bash
-FQ=$HOME/test_data/fastq_hg002_new/HG002_novogene_wes_18g_rep1_R2.fq.gz      # any R1 or R2 file
-zcat $FQ | head -40000 | awk 'NR%4==2 {n++; for (i=1;i<=15;i++) c[i, substr($0,i,1)]++}
-  END {for (i=1;i<=15;i++) printf "pos%2d  A:%5.1f  C:%5.1f  G:%5.1f  T:%5.1f\n", i,
-       100*c[i,"A"]/n, 100*c[i,"C"]/n, 100*c[i,"G"]/n, 100*c[i,"T"]/n}'
-```
-
 ## Appendix B. Demonstration data and benchmarking
 
 | Arm | Data | Truth set | Comparison |
 |---|---|---|---|
-| Somatic | SEQC2 HCC1395 (SRR7890883) / HCC1395BL (SRR7890874), SureSelect V6 + UTR; SRA SRP162370 | SEQC2 v1.2.1 high-confidence SNVs/indels and regions (step 10.2) | `rtg vcfeval --sample ALT` on site-only VCFs, SNVs and indels separately; calls at LowConf/Unclassified superset sites and novel calls < 5% VAF excluded |
-| Germline | GIAB HG002, Novogene SureSelect V6 exome (github.com/novogene-europe/ngs_demo_datasets) | GIAB v4.2.1 (step 10.3) | genotype-aware `rtg vcfeval` in callable targets ∩ benchmark regions |
+| Somatic | SEQC2 HCC1395 (SRR7890883) / HCC1395BL (SRR7890874), SureSelect V6 + UTR; SRA SRP162370 | SEQC2 v1.2.1 high-confidence SNVs/indels and regions (step 9.2) | `rtg vcfeval --sample ALT` on site-only VCFs, SNVs and indels separately; calls at LowConf/Unclassified superset sites and novel calls < 5% VAF excluded |
+| Germline | GIAB HG002, Novogene SureSelect V6 exome (github.com/novogene-europe/ngs_demo_datasets) | GIAB v4.2.1 (step 9.3) | genotype-aware `rtg vcfeval` in callable targets ∩ benchmark regions |
 | RNA fusion | HCC1395 bulk RNA-seq SRR9134735 (SRA SRP199641) | Fusion genes of the RNA-supported SVs of Talsania et al., 2022 (Additional file 9; 24 entries, 23 distinct events) | `fusion_truth_match.py` (gene pairs in either orientation, HGNC renaming, intergenic gene lists) |
 
 Helper scripts: `make_figures.py` (Figures 2 and 4), `benchmark_plots.py` (Figures 3 and 5), `trace_table.py` (Table 1)
-and `fusion_truth_match.py` (step 14); commands in step 15. Table 2 is `somatic_metrics.tsv` (steps 12.5-12.6).
+and `fusion_truth_match.py` (step 13); commands in step 14. Table 2 is `somatic_metrics.tsv` (steps 11.5-11.6).
 
 ---
 
-### 10. Benchmark truth sets
+### 9. Benchmark truth sets
 
-#### 10.0 Shell variables (set once)
+#### 9.0 Shell variables (set once)
 ```bash
 PIPE=${HOME}/genomics_pipeline
 DATA=${HOME}/test_data
@@ -1549,12 +1532,12 @@ RTG="$SX $E/rtg_tools.sif rtg"
 BEDTOOLS="$SX $E/gatk.sif bedtools"
 ```
 
-#### 10.1 RTG reference for vcfeval [Generate]
+#### 9.1 RTG reference for vcfeval [Generate]
 
 ```bash
 $RTG format -o $R/truth/GRCh38_sdf $REF
 ```
-#### 10.2 SEQC2 somatic, HCC1395 [Download + Generate]
+#### 9.2 SEQC2 somatic, HCC1395 [Download + Generate]
 
 ```bash
 S2=https://ftp-trace.ncbi.nlm.nih.gov/seqc/ftp/Somatic_Mutation_WG/release/v1.2.1
@@ -1571,7 +1554,7 @@ $BEDTOOLS intersect -a $R/capture/S07604624/S07604624_targets_pad100.bed.gz -b $
   | sort -k1,1 -k2,2n | $BEDTOOLS merge -i - > $R/truth/S07604624_targets_pad100_SEQC2_highconf.bed
 ```
 
-#### 10.3 GIAB HG002 germline, v4.2.1 [Download]
+#### 9.3 GIAB HG002 germline, v4.2.1 [Download]
 
 ```bash
 GB=https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/NISTv4.2.1/GRCh38
@@ -1580,7 +1563,7 @@ wget -c -P $R/truth $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz $GB/HG002_GRCh
                          $GB/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed
 ```
 
-### 11. Benchmark settings and scoring helper
+### 10. Benchmark settings and scoring helper
 
 ```bash
 OUT_S=$DATA/Result_valid_17_Oct_26_som      # set: outdir of the SEQC2 somatic run
@@ -1588,7 +1571,7 @@ OUT_G=$DATA/Result_valid_17_Oct_26_germ     # set: outdir of the HG002 germline 
 
 HEADER="callset\ttype\ttruth\tTP\tFP\tFN\trecall\tprecision\tF1"
 ```
-#### 11.1 Counts and metrics per variant type from one vcfeval folder
+#### 10.1 Counts and metrics per variant type from one vcfeval folder
 
 ```bash
 count_metrics () {    # usage: count_metrics <vcfeval_dir> <label>
@@ -1604,7 +1587,7 @@ count_metrics () {    # usage: count_metrics <vcfeval_dir> <label>
 }
 ```
 
-### 12. Somatic benchmark: SEQC2 HCC1395 / HCC1395BL (valid1)
+### 11. Somatic benchmark: SEQC2 HCC1395 / HCC1395BL (valid1)
 
 ```bash
 mkdir -p $OUT_S/benchmark && cd $OUT_S/benchmark
@@ -1612,7 +1595,7 @@ EVAL=$R/truth/S07604624_targets_pad100_SEQC2_highconf.bed
 awk '{s+=$3-$2} END{print "somatic evaluation region: " s/1e6 " Mb"}' $EVAL
 ```
 
-#### 12.1 Truth: HighConf + MedConf, FILTER = PASS, no samples, split alleles
+#### 11.1 Truth: HighConf + MedConf, FILTER = PASS, no samples, split alleles
 
 ```bash
 $BCF view -G $T/SEQC2_Truth_v1.2.1.vcf.gz \
@@ -1621,7 +1604,7 @@ $BCF view -G $T/SEQC2_Truth_v1.2.1.vcf.gz \
 $BCF index -f -t truth_somatic.vcf.gz
 ```
 
-#### 12.2 Superset and its non-truth labels (FILTER column)
+#### 11.2 Superset and its non-truth labels (FILTER column)
 
 ```bash
 $BCF concat -a $T/sSNV.MSDUKT.superSet.v1.2.vcf.gz $T/sINDEL.MDKT.superSet.v1.2.vcf.gz \
@@ -1641,7 +1624,7 @@ $BCF isec -C -w1 lowconf.vcf.gz      truth_somatic.vcf.gz -Oz -o lowconf.x.vcf.g
 $BCF isec -C -w1 unclassified.vcf.gz truth_somatic.vcf.gz -Oz -o unclassified.x.vcf.gz && mv unclassified.x.vcf.gz unclassified.vcf.gz && $BCF index -f -t unclassified.vcf.gz
 ```
 
-#### 12.3 Score one call set
+#### 11.3 Score one call set
 
 Scoring rules: novel calls (not in the superset) with tumor VAF < 5% are dropped, and calls at LowConf sites
 are dropped. The `main` score also drops calls at Unclassified sites; the `strict` score keeps them, so they count
@@ -1680,7 +1663,7 @@ score_somatic () {    # usage: score_somatic <label> <vcf> [bcftools view select
 echo -e "$HEADER" > somatic_metrics.tsv
 ```
 
-#### 12.4 Call sets
+#### 11.4 Call sets
 
 ```bash
 find $OUT_S -name "valid1*.vcf.gz" | sort    # list the VCFs, then set the paths below
@@ -1695,7 +1678,7 @@ VARSCAN_SNV=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_snv.a
 VARSCAN_INDEL=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_indel.af.vcf.gz
 ```
 
-#### 12.5 Final call set (Table 2) and consensus
+#### 11.5 Final call set (Table 2) and consensus
 
 ```bash
 score_somatic final_pass     $FILT -f PASS     # consensus + VAF/alt reads/depth/normal filters
@@ -1703,7 +1686,7 @@ score_somatic consensus_pass $CONS -f PASS     # ≥ 2 callers
 score_somatic consensus_all  $CONS             # all consensus records: Mutect2 PASS (incl. LOWCONSENSUS) + rescued union sites
 ```
 
-#### 12.6 Each caller before (raw) and after (pass) its own filter (Figure 3 and Table 2)
+#### 11.6 Each caller before (raw) and after (pass) its own filter (Figure 3 and Table 2)
 
 ```bash
 $BCF concat -a $STRELKA_SNV $STRELKA_INDEL | $BCF sort -Oz -o strelka2.vcf.gz - && $BCF index -f -t strelka2.vcf.gz
@@ -1720,7 +1703,7 @@ score_somatic varscan_pass  varscan.vcf.gz  -i 'INFO/SS=2'
 column -t somatic_metrics.tsv
 ```
 
-### 13. Germline benchmark: GIAB HG002
+### 12. Germline benchmark: GIAB HG002
 
 ```bash
 mkdir -p $OUT_G/benchmark && cd $OUT_G/benchmark
@@ -1730,7 +1713,7 @@ CALLS=$(find $OUT_G -iname "*hg002*_filtered.vcf.gz"  | head -1); echo "calls: $
 THR=$(find   $OUT_G -iname "*hg002*thresholds.bed.gz" | head -1); echo "thresholds: $THR"
 ```
 
-#### 13.1 Callable targets: ≥ 90% of bases at ≥ 10X
+#### 12.1 Callable targets: ≥ 90% of bases at ≥ 10X
 
 ```bash
 zcat $THR | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="10X") c=i; if(!c){print "ERROR: no 10X column" > "/dev/stderr"; exit 1}; next}
@@ -1738,7 +1721,7 @@ zcat $THR | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="10X") c=i; if(!c){print "ERROR
   | sort -k1,1 -k2,2n > callable.bed
 ```
 
-#### 13.2 Evaluation region: callable targets inside GIAB confident regions
+#### 12.2 Evaluation region: callable targets inside GIAB confident regions
 
 ```bash
 $BEDTOOLS intersect -a callable.bed -b $T/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed \
@@ -1747,12 +1730,12 @@ $BEDTOOLS merge -i callable_giab.bed > HG002_eval.bed
 awk '{s+=$3-$2} END{print "germline evaluation region: " s/1e6 " Mb"}' HG002_eval.bed
 ```
 
-#### 13.3 Calls
+#### 12.3 Calls
 
 ```bash
 $BCF index -f -t $CALLS 2>/dev/null; cp $CALLS hg002_calls.vcf.gz; cp $CALLS.tbi hg002_calls.vcf.gz.tbi
 ```
-#### 13.4 Genotype-aware scoring: before filter (all records) and after filter (PASS)
+#### 12.4 Genotype-aware scoring: before filter (all records) and after filter (PASS)
 
 ```bash
 echo -e "$HEADER" > germline_metrics.tsv
@@ -1766,7 +1749,7 @@ done
 column -t germline_metrics.tsv
 ```
 
-### 14. RNA fusion benchmark: HCC1395 RNA-seq vs the Talsania et al. 2022 fusion list
+### 13. RNA fusion benchmark: HCC1395 RNA-seq vs the Talsania et al. 2022 fusion list
 
 ```bash
 OUT_R=$DATA/Result_valid_17_Oct_26_rna      # set: outdir of the RNA fusion run
@@ -1775,7 +1758,7 @@ TRUTH=$T/Talsania_2022_Add_File9.csv        # set: Talsania Additional file 9, s
 mkdir -p $OUT_R/benchmark && cd $OUT_R/benchmark
 ```
 
-#### 14.1 Calls and gene-name table
+#### 13.1 Calls and gene-name table
 
 ```bash
 CALLS=$(find $OUT_R -name "*_fusions_annotated.tsv" | head -1); echo "calls: $CALLS"
@@ -1785,13 +1768,13 @@ CALLS=$(find $OUT_R -name "*_fusions_annotated.tsv" | head -1); echo "calls: $CA
 head -1 $TRUTH | tr ',' '\n' | grep -n "fusion"    # check: the column "RNA-seq fusion_genes" must be listed
 ```
 
-#### 14.2 Match calls to the list (gene order, renamed genes, intergenic lists handled)
+#### 13.2 Match calls to the list (gene order, renamed genes, intergenic lists handled)
 
 ```bash
 python3 $SCRIPT --truth $TRUTH --calls $CALLS --hgnc $T/hgnc_complete_set.txt --out fusion_truth_result.tsv
 ```
 
-#### 14.3 Recovered fusions by consensus status and tier
+#### 13.3 Recovered fusions by consensus status and tier
 
 ```bash
 echo "== recovered, by consensus verdict"
@@ -1802,7 +1785,7 @@ echo "== missed, but at least one partner gene appears in the calls"
 awk -F'\t' 'NR>1 && $4=="missed" && $9!="-"' fusion_truth_result.tsv | wc -l
 
 ```
-#### 14.4 Calls that are not in the reference list
+#### 13.4 Calls that are not in the reference list
 
 ```bash
 total=$(grep -v '^#' $CALLS | tail -n +2 | wc -l)
@@ -1810,9 +1793,9 @@ matched=$(awk -F'\t' 'NR>1 && $4=="FOUND"{print $5}' fusion_truth_result.tsv | s
 echo "pipeline fusions: $total   matching a listed fusion: $matched   not in the list: $((total - matched))"
 ```
 
-### 15. Figures and tables
+### 14. Figures and tables
 
-Needs Python 3 with pandas, numpy and matplotlib. Figure 3 uses the rows written by steps 12.5 and 12.6.
+Needs Python 3 with pandas, numpy and matplotlib. Figure 3 uses the rows written by steps 11.5 and 11.6.
 
 ```bash
 mkdir -p $DATA/figures && cd $DATA/figures
@@ -1826,7 +1809,7 @@ python3 $PIPE/trace_table.py $OUT_G/pipeline_trace.txt -o Table1_germline.tsv
 python3 $PIPE/trace_table.py $OUT_R/pipeline_trace.txt -o Table1_rna.tsv
 ```
 
-Table 2 is `$OUT_S/benchmark/somatic_metrics.tsv` (steps 12.5-12.6).
+Table 2 is `$OUT_S/benchmark/somatic_metrics.tsv` (steps 11.5-11.6).
 
 ---
 

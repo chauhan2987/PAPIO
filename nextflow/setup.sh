@@ -38,12 +38,14 @@
 #     references/genome/     GRCh38.d1.vd1.fa(.fai) .dict, bwa_mem2/
 #     references/gatk/       GATK bundle VCFs restricted to the reference contigs (upstream names)
 #     references/somalier/ clinvar/ gnomad/ vep_cache/ vep_plugins/ cosmic/ annotsv/
-#     references/annotation/ gene, MANE CDS, arm and reportable-gene files
+#     references/annotation/ gene, MANE CDS, arm and reportable-gene files, gCNV contig-ploidy priors
 #     references/sequenza/ msi/
 #     references/capture/<KIT>/  <KIT>_targets.bed, <KIT>_baits.bed, their .interval_list,
-#                            <KIT>_targets_pad100.bed.gz, scatter_24_pad100/, scatter_150_pad100/,
-#                            gcnv/ (and, built later, cnvkit_pon.cnn, inhouse_pon.vcf.gz)
-#     references/gencode/ star/ (StarIndex_gencode_v49/, gencode_v49_transcripts.fa) rna_qc/ ctat/ arriba/ fusion/ fusioncatcher/
+#                            <KIT>_targets_pad100.bed.gz, <KIT>_scatter_24_pad100/, <KIT>_scatter_150_pad100/,
+#                            gcnv/ (<KIT>_preprocessed_intervals.interval_list, <KIT>_annotated_intervals.tsv,
+#                            <KIT>_scatter_24_pad250/); built later: <KIT>_cnvkit_pon.cnn,
+#                            <KIT>_inhouse_pon.vcf.gz
+#     references/gencode/ star/ (StarIndex_gencode_v49/, gencode.v49.annotation.transcripts.fa) rna_qc/ ctat/ arriba/ fusion/ fusioncatcher/
 #     references/trust4/ telescope/ refphi/
 #
 #   Site overrides (mirrors, registry): export PAPIO_SETUP_CONF=<file>; the file is
@@ -289,7 +291,7 @@ make_kit() {
     [ -s "${C}/${KIT_ID}_targets.interval_list" ] || sx gatk gatk BedToIntervalList -I "${C}/${KIT_ID}_targets.bed" -SD "$DICT" -O "${C}/${KIT_ID}_targets.interval_list"
     ## padded calling shards: targets +-100 bp, overlaps merged, no target split between shards
     for n in 24 150; do
-        d="${C}/scatter_${n}_pad100"
+        d="${C}/${KIT_ID}_scatter_${n}_pad100"
         [ -n "$(ls "$d" 2>/dev/null)" ] && continue
         rm -rf "${d}.tmp"
         sx gatk gatk SplitIntervals -R "$REF" -L "${C}/${KIT_ID}_targets.interval_list" --interval-padding 100 \
@@ -298,27 +300,24 @@ make_kit() {
     done
     ## call regions for Strelka2 / Manta, built from the somatic shards
     if [ ! -s "${C}/${KIT_ID}_targets_pad100.bed.gz.tbi" ]; then
-        grep -hv '^@' "${C}"/scatter_24_pad100/*.interval_list | awk 'BEGIN { OFS = "\t" } { print $1, $2 - 1, $3 }' \
+        grep -hv '^@' "${C}/${KIT_ID}_scatter_24_pad100"/*.interval_list | awk 'BEGIN { OFS = "\t" } { print $1, $2 - 1, $3 }' \
             | LC_ALL=C sort -k1,1 -k2,2n | merge3 > "${C}/${KIT_ID}_targets_pad100.bed"
         sx align bgzip -f "${C}/${KIT_ID}_targets_pad100.bed"
         sx align tabix -f -p bed "${C}/${KIT_ID}_targets_pad100.bed.gz"
     fi
     ## germline copy-number (gCNV) intervals; run_gcnv itself stays off (needs >= 30 normals)
     g="${C}/gcnv"; mkdir -p "$g"
-    [ -s "${g}/preprocessed_intervals.interval_list" ] || sx gatk gatk PreprocessIntervals -R "$REF" -L "${C}/${KIT_ID}_targets.interval_list" \
-        --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O "${g}/preprocessed_intervals.interval_list"
-    [ -s "${g}/annotated_intervals.tsv" ] || sx gatk gatk AnnotateIntervals -R "$REF" -L "${g}/preprocessed_intervals.interval_list" \
-        --interval-merging-rule OVERLAPPING_ONLY -O "${g}/annotated_intervals.tsv"
-    if [ -z "$(ls "${g}/scatter" 2>/dev/null)" ]; then
-        rm -rf "${g}/scatter_tmp" "${g}/scatter"; mkdir -p "${g}/scatter"
-        sx gatk gatk IntervalListTools --INPUT "${g}/preprocessed_intervals.interval_list" \
-            --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT "${g}/scatter_tmp"
-        i=0; for d in "${g}"/scatter_tmp/temp_*; do i=$((i + 1)); cp "${d}/scattered.interval_list" "$(printf '%s/scatter/shard_%04d.interval_list' "$g" "$i")"; done
-        rm -rf "${g}/scatter_tmp"
+    [ -s "${g}/${KIT_ID}_preprocessed_intervals.interval_list" ] || sx gatk gatk PreprocessIntervals -R "$REF" -L "${C}/${KIT_ID}_targets.interval_list" \
+        --bin-length 0 --padding 250 --interval-merging-rule OVERLAPPING_ONLY -O "${g}/${KIT_ID}_preprocessed_intervals.interval_list"
+    [ -s "${g}/${KIT_ID}_annotated_intervals.tsv" ] || sx gatk gatk AnnotateIntervals -R "$REF" -L "${g}/${KIT_ID}_preprocessed_intervals.interval_list" \
+        --interval-merging-rule OVERLAPPING_ONLY -O "${g}/${KIT_ID}_annotated_intervals.tsv"
+    if [ -z "$(ls "${g}/${KIT_ID}_scatter_24_pad250" 2>/dev/null)" ]; then
+        rm -rf "${DL}/${KIT_ID}_gcnv_scatter_tmp" "${g}/${KIT_ID}_scatter_24_pad250"; mkdir -p "${g}/${KIT_ID}_scatter_24_pad250"
+        sx gatk gatk IntervalListTools --INPUT "${g}/${KIT_ID}_preprocessed_intervals.interval_list" \
+            --SUBDIVISION_MODE INTERVAL_COUNT --SCATTER_COUNT 24 --OUTPUT "${DL}/${KIT_ID}_gcnv_scatter_tmp"
+        i=0; for d in "${DL}/${KIT_ID}_gcnv_scatter_tmp"/temp_*; do i=$((i + 1)); cp "${d}/scattered.interval_list" "$(printf '%s/%s_scatter_24_pad250/shard_%04d.interval_list' "$g" "$KIT_ID" "$i")"; done
+        rm -rf "${DL}/${KIT_ID}_gcnv_scatter_tmp"
     fi
-    awk 'BEGIN { OFS = "\t"; print "CONTIG_NAME", "PLOIDY_PRIOR_0", "PLOIDY_PRIOR_1", "PLOIDY_PRIOR_2", "PLOIDY_PRIOR_3"
-        for (i = 1; i <= 22; i++) print "chr" i, "0.01", "0.01", "0.97", "0.01"
-        print "chrX", "0.01", "0.49", "0.49", "0.01"; print "chrY", "0.495", "0.495", "0.01", "0.01" }' > "${g}/contig_ploidy_priors.tsv"
 }
 
 ## Function to download one COSMIC file: cosmic_get <path in the COSMIC bucket> <output file>
@@ -338,9 +337,10 @@ write_full_params() {
     mkdir -p "${DIR}/params"
     for f in "${PIPELINE_DIR}"/params/params_{somatic,somatic_sensitive,germline,rna_fusion}.yaml; do
         out="${DIR}/params/$(basename "$f")"
-        sed -e "s#/path/to/papio_resources#${R}#g" -e "s#/path/to/papio_containers#${CONTAINERS}#g" \
-            -e "s#/path/to/PAPIO#${PIPELINE_DIR}#g" -e "s#clinvar_YYYYMMDD#clinvar_${CV_DATE}#g" \
-            -e "s#/path/to/run#${DIR}/runs#g" -e "s#/path/to/demo#${DIR}/demo#g" "$f" > "$out"
+        ## the templates use the README layout (${projectDir}/../references etc.); write this install's folders
+        sed -e "s#\${projectDir}/\.\./references#${R}#g" -e "s#\${projectDir}/\.\./containers#${CONTAINERS}#g" \
+            -e "s#\${projectDir}/\.\./runs#${DIR}/runs#g" -e "s#\${projectDir}/\.\./demo#${DIR}/demo#g" \
+            -e "s#clinvar_YYYYMMDD#clinvar_${CV_DATE}#g" "$f" > "$out"
         ## optional resources that are not on disk: switched off instead of failing at run time
         if [ -n "$KIT_ID" ]; then
             case "$f" in *rna_fusion*) ;;
@@ -349,19 +349,19 @@ write_full_params() {
                     yset "$out" bait_interval_list   "${C}/${KIT_ID}_baits.interval_list"
                     yset "$out" target_interval_list "${C}/${KIT_ID}_targets.interval_list"
                     yset "$out" call_regions_gz      "${C}/${KIT_ID}_targets_pad100.bed.gz"
-                    yset "$out" scatter_intervals    "${C}/scatter_24_pad100"
-                    yset "$out" germline_scatter_intervals "${C}/scatter_150_pad100"
+                    yset "$out" scatter_intervals    "${C}/${KIT_ID}_scatter_24_pad100"
+                    yset "$out" germline_scatter_intervals "${C}/${KIT_ID}_scatter_150_pad100"
                     case "$f" in *germline*)
-                        yset "$out" preprocessed_intervals   "${C}/gcnv/preprocessed_intervals.interval_list"
-                        yset "$out" gcnv_annotated_intervals "${C}/gcnv/annotated_intervals.tsv"
-                        yset "$out" gcnv_scatter_intervals   "${C}/gcnv/scatter"
-                        yset "$out" contig_ploidy_priors     "${C}/gcnv/contig_ploidy_priors.tsv" ;;
+                        yset "$out" preprocessed_intervals   "${C}/gcnv/${KIT_ID}_preprocessed_intervals.interval_list"
+                        yset "$out" gcnv_annotated_intervals "${C}/gcnv/${KIT_ID}_annotated_intervals.tsv"
+                        yset "$out" gcnv_scatter_intervals   "${C}/gcnv/${KIT_ID}_scatter_24_pad250"
+                        yset "$out" contig_ploidy_priors     "${R}/annotation/GRCh38_contig_ploidy_priors.tsv" ;;
                     esac ;;
             esac
         fi
         if [ "$DO_COSMIC" -eq 1 ]; then
             yset "$out" cosmic_cgc_tsv "${R}/cosmic/Cosmic_CancerGeneCensus_${COSMIC_VERSION}_GRCh38.tsv.gz"
-            case "$f" in *rna_fusion*) ;; *) yset "$out" cosmic_vcf "${R}/cosmic/cosmic_genome_screens_${COSMIC_VERSION}_chr_dedup.vcf.gz" ;; esac
+            case "$f" in *rna_fusion*) ;; *) yset "$out" cosmic_vcf "${R}/cosmic/Cosmic_GenomeScreensMutant_Normal_${COSMIC_VERSION}_GRCh38.chr_dedup.vcf.gz" ;; esac
         fi
         for k in gnomad_faf_vcf annotsv_dir fusioncatcher_db verifybamid_db cnvkit_pon cosmic_vcf cosmic_cgc_tsv \
                  salmon_transcripts trust4_ref_dir telescope_gtf somalier_ancestry_labels somalier_1kg_dir coverage_report_bed germline_report_genes; do
@@ -559,8 +559,8 @@ if [ "$DO_GNOMAD" -eq 1 ]; then
         [ "$(md5sum "$GF" | cut -d' ' -f1)" = "$GNOMAD_FAF_MD5" ] || die "MD5 mismatch for $GF - delete it and re-run"
         fetch "${URL_GNOMAD_FAF}.tbi" "${GF}.tbi"
     fi
-    sx align bcftools view -h "$GF" | grep -q '^##INFO=<ID=fafmax_faf95_max_joint,' \
-        || die "$GF has no INFO/fafmax_faf95_max_joint"
+    sx align bcftools view -h "$GF" | grep '^##INFO=<ID=fafmax_faf95_max_j,' >/dev/null \
+        || die "$GF has no INFO/fafmax_faf95_max_j"
 fi
 
 step "VEP 115 cache and NMD plugin"
@@ -594,13 +594,13 @@ fi
 ## reportable genes (written once; edit for your own list) and their MANE coding exons (column 4 = gene)
 RG="${R}/annotation/reportable_genes.txt"
 [ -s "$RG" ] || printf '%s\n' $REPORTABLE_GENES > "$RG"
-if [ ! -s "${R}/annotation/reportable_genes_MANE_CDS.bed" ] || [ "$RG" -nt "${R}/annotation/reportable_genes_MANE_CDS.bed" ]; then
+if [ ! -s "${R}/annotation/ensembl115_reportable_genes_MANE_CDS.bed" ] || [ "$RG" -nt "${R}/annotation/ensembl115_reportable_genes_MANE_CDS.bed" ]; then
     zcat "${DL}/Homo_sapiens.GRCh38.115.gtf.gz" | awk -F'\t' -v list="$RG" 'BEGIN { OFS = "\t"; while ((getline g < list) > 0) G[toupper(g)] = 1 }
         $3 == "CDS" && $9 ~ /tag "MANE_Select"/ && match($9, /gene_name "[^"]+"/) {
           g = substr($9, RSTART + 11, RLENGTH - 12); c = $1; if (c == "MT") c = "M"
           if (c ~ /^([0-9]+|X|Y|M)$/ && (toupper(g) in G)) print "chr" c, $4 - 1, $5, g }' \
-        | LC_ALL=C sort -k1,1 -k2,2n -u > "${R}/annotation/reportable_genes_MANE_CDS.bed.tmp"
-    mv "${R}/annotation/reportable_genes_MANE_CDS.bed.tmp" "${R}/annotation/reportable_genes_MANE_CDS.bed"
+        | LC_ALL=C sort -k1,1 -k2,2n -u > "${R}/annotation/ensembl115_reportable_genes_MANE_CDS.bed.tmp"
+    mv "${R}/annotation/ensembl115_reportable_genes_MANE_CDS.bed.tmp" "${R}/annotation/ensembl115_reportable_genes_MANE_CDS.bed"
 fi
 if [ ! -s "${R}/annotation/GRCh38_arms.bed" ]; then
     fetch "$URL_CYTOBAND" "${DL}/cytoBand.hg38.txt.gz"
@@ -612,6 +612,11 @@ if [ ! -s "${R}/annotation/GRCh38_arms.bed" ]; then
                 if (arm ~ /^(13|14|15|21|22)p$/) continue      # acrocentric p arms: no assembled sequence
                 print a[1], s[k], e[k], arm } }' | LC_ALL=C sort -k1,1 -k2,2n > "${R}/annotation/GRCh38_arms.bed"
 fi
+## gCNV contig-ploidy priors: genome-level (expected copies of each chromosome), the same for every kit
+[ -s "${R}/annotation/GRCh38_contig_ploidy_priors.tsv" ] || awk 'BEGIN { OFS = "\t"
+    print "CONTIG_NAME", "PLOIDY_PRIOR_0", "PLOIDY_PRIOR_1", "PLOIDY_PRIOR_2", "PLOIDY_PRIOR_3"
+    for (i = 1; i <= 22; i++) print "chr" i, "0.01", "0.01", "0.97", "0.01"
+    print "chrX", "0.01", "0.49", "0.49", "0.01"; print "chrY", "0.495", "0.495", "0.01", "0.01" }' > "${R}/annotation/GRCh38_contig_ploidy_priors.tsv"
 
 step "Sequenza GC wiggle and MSIsensor-pro site list"
 SQ="${R}/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz"
@@ -628,7 +633,7 @@ if [ "$DO_COSMIC" -eq 1 ]; then
     step "COSMIC ${COSMIC_VERSION} (licence)"
     CO="${R}/cosmic"; mkdir -p "$CO"
     CGC="${CO}/Cosmic_CancerGeneCensus_${COSMIC_VERSION}_GRCh38.tsv.gz"
-    CV="${CO}/cosmic_genome_screens_${COSMIC_VERSION}_chr_dedup.vcf.gz"
+    CV="${CO}/Cosmic_GenomeScreensMutant_Normal_${COSMIC_VERSION}_GRCh38.chr_dedup.vcf.gz"
     if [ ! -s "$CGC" ]; then
         cosmic_get "grch38/cosmic/${COSMIC_VERSION}/Cosmic_CancerGeneCensus_Tsv_${COSMIC_VERSION}_GRCh38.tar" "${DL}/cosmic_cgc.tar"
         tar -C "$CO" -xf "${DL}/cosmic_cgc.tar" "$(basename "$CGC")" || die "$(basename "$CGC") not in the COSMIC CGC archive"
@@ -664,15 +669,15 @@ if [ ! -s "$GTF49" ]; then
 fi
 SI="${R}/star/StarIndex_gencode_v49"
 if [ ! -s "${SI}/SA" ] || [ ! -s "${SI}/genomeParameters.txt" ]; then
-    rm -rf "$SI"; mkdir -p "$SI"
+    rm -rf "$SI" "${DL}/star_index_tmp"; mkdir -p "$SI"      # STAR needs a new --outTmpDir
     sx star STAR --runMode genomeGenerate --runThreadN "$THREADS" --genomeDir "$SI" --genomeFastaFiles "$REF" \
-        --sjdbGTFfile "$GTF49" --sjdbOverhang 100 --limitGenomeGenerateRAM 60000000000 --outTmpDir "${SI}/_tmp" \
+        --sjdbGTFfile "$GTF49" --sjdbOverhang 100 --limitGenomeGenerateRAM 60000000000 --outTmpDir "${DL}/star_index_tmp" \
         ${STAR_GENOME_EXTRA}
-    rm -rf "${SI}/_tmp"
+    rm -rf "${DL}/star_index_tmp"
 fi
 ## Salmon transcript FASTA: same GTF + genome as the STAR index (Salmon quantifies STAR's
 ## transcriptome alignments; every transcript of that BAM must be in the FASTA)
-TXFA="${R}/star/gencode_v49_transcripts.fa"
+TXFA="${R}/star/gencode.v49.annotation.transcripts.fa"
 if [ "$DO_SALMON" -eq 1 ] && [ ! -s "$TXFA" ]; then
     cp "${PIPELINE_DIR}/scripts/gtf_to_transcripts.sh" "${DL}/gtf_to_transcripts.sh"     # inside the bound folder
     TMPDIR="$DL" sx align bash "${DL}/gtf_to_transcripts.sh" --gtf "$GTF49" --fasta "$REF" --out "$TXFA" \
@@ -688,7 +693,7 @@ if [ ! -s "${CT}/ctat_genome_lib_build_dir/ref_annot.gtf" ]; then
     [ -s "${CT}/ctat_genome_lib_build_dir/ref_annot.gtf" ] || die "CTAT library layout not as expected under ${CT}"
     [ "$KEEP" -eq 1 ] || rm -f "${DL}/$(basename "$URL_CTAT")"
 fi
-if [ ! -s "${R}/fusion/known_fusions.tsv" ]; then
+if [ ! -s "${R}/fusion/known_fusions_hg38_GRCh38_v2.5.1.tsv" ]; then
     fetch "$URL_ARRIBA" "${DL}/arriba_v2.5.1.tar.gz"
     tar -C "$DL" -xzf "${DL}/arriba_v2.5.1.tar.gz" --wildcards '*/database/*hg38*'
     find "$DL" -path '*/database/*hg38*' -type f -exec mv {} "${R}/arriba/" \;
@@ -696,7 +701,7 @@ if [ ! -s "${R}/fusion/known_fusions.tsv" ]; then
         [ -s "${R}/arriba/${f}" ] || die "Arriba database file ${f} missing"
     done
     ## known_fusions_tsv for the fusion annotation step: uncompressed copy of Arriba's list
-    zcat "${R}/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz" > "${R}/fusion/known_fusions.tsv"
+    zcat "${R}/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz" > "${R}/fusion/known_fusions_hg38_GRCh38_v2.5.1.tsv"
     [ "$KEEP" -eq 1 ] || rm -rf "${DL}/arriba_v2.5.1.tar.gz" "${DL}"/arriba_v2.5.1
 fi
 step "RNA immune and expression resources: TRUST4, HERV (Telescope), refPhi (InstaPrism)"
@@ -735,7 +740,7 @@ Still needed (cannot be downloaded automatically); the params files point at the
   2. demonstration FASTQs: bash ${PIPELINE_DIR}/scripts/download_demo_fastq.sh ${DIR}/demo
      (or set dna_samplesheet / rna_samplesheet and fastq_root to your own data)
   3. optional, set to null until present: CNVkit panel of normals for the kit, VerifyBamID2 resource,
-     in-house Mutect2 panel of normals (main_pon.nf, from your normals; README Appendix A, step 3.4)$( [ "$DO_COSMIC" -eq 1 ] || echo ", COSMIC (--cosmic)")$( [ "$DO_ANNOTSV" -eq 1 ] || echo ", AnnotSV annotations")$( [ "$DO_GNOMAD" -eq 1 ] || echo ", gnomAD filtering AF")$( [ "$DO_SALMON" -eq 1 ] || echo ", Salmon transcript FASTA (--no-salmon)")
+     in-house Mutect2 panel of normals (main_pon.nf, from your normals; README Appendix A, step 4.5)$( [ "$DO_COSMIC" -eq 1 ] || echo ", COSMIC (--cosmic)")$( [ "$DO_ANNOTSV" -eq 1 ] || echo ", AnnotSV annotations")$( [ "$DO_GNOMAD" -eq 1 ] || echo ", gnomAD filtering AF")$( [ "$DO_SALMON" -eq 1 ] || echo ", Salmon transcript FASTA (--no-salmon)")
   4. reportable genes: ${R}/annotation/reportable_genes.txt holds the README example list (RCC);
      edit it and re-run setup to rebuild the per-gene coverage BED
 Then check and run:

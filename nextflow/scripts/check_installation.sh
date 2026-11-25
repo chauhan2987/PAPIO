@@ -19,6 +19,8 @@ set -uo pipefail
 PARAMS=${1:?usage: check_installation.sh <params.yaml> [nextflow.config]}
 NF_CONFIG=${2:-$(dirname "$0")/../nextflow.config}
 NF_TESTED="26.04.1"
+## ${projectDir} in a params file is the folder of main.nf (Nextflow expands it); ${launchDir} the run folder
+PROJECT_DIR=$(cd "$(dirname "$NF_CONFIG")" 2>/dev/null && pwd || dirname "$NF_CONFIG")
 N_PASS=0; N_WARN=0; N_FAIL=0
 
 [ -s "$PARAMS" ] || { echo "ERROR: params file not found: $PARAMS" >&2; exit 1; }
@@ -34,6 +36,7 @@ yget() {
             sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+#.*$/, "")
             gsub(/^["\047]|["\047]$/, ""); print; exit }' "$PARAMS")
     if [ -z "$v" ] || [ "$v" = "null" ] || [ "$v" = "~" ]; then v="${2:-}"; fi
+    v=${v//\$\{projectDir\}/$PROJECT_DIR}; v=${v//\$\{baseDir\}/$PROJECT_DIR}; v=${v//\$\{launchDir\}/$PWD}
     echo "$v"
 }
 

@@ -51,7 +51,7 @@ if   has ClinVar_CLNSIG; then clin_tag='%ClinVar_CLNSIG'; clin_src="ClinVar VCF 
 elif has CLIN_SIG;       then clin_tag='%CLIN_SIG';       clin_src="VEP cache CLIN_SIG"
 else clin_tag=''; clin_src="none"; fi
 ## a missing field would make split-vep fail and hide behind "(query failed)": write '.'
-if   has gnomAD_fafmax_faf95_max_joint; then af_tag='%gnomAD_fafmax_faf95_max_joint'; af_name='gnomAD_FAF95_GRPMAX'
+if   has gnomAD_fafmax_faf95_max_j; then af_tag='%gnomAD_fafmax_faf95_max_j'; af_name='gnomAD_FAF95_GRPMAX'
 elif has MAX_AF;                        then af_tag='%MAX_AF';                        af_name='MAX_AF'
 else                                         af_tag='.';                              af_name='MAX_AF'; fi
 if has ClinVar_CLNREVSTAT; then rev_tag='%ClinVar_CLNREVSTAT'; else rev_tag='.'; fi

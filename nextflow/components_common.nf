@@ -1491,7 +1491,7 @@ process ANNOTATE_VCF {
     def cosmic_flag = (cosmic && params.analysis in ['somatic', 'tumor_only'])
         ? "--custom ${cosmic},COSMIC,vcf,exact,0,GENOME_SCREEN_SAMPLE_COUNT,TIER" : ''
     // gnomAD v4.1 grpmax filtering AF (95% CI; ClinGen-recommended for BA1/BS1): README Appendix A, step 7.6
-    def faf_flag = gnomad_faf ? "--custom ${gnomad_faf},gnomAD,vcf,exact,0,fafmax_faf95_max_joint" : ''
+    def faf_flag = gnomad_faf ? "--custom ${gnomad_faf},gnomAD,vcf,exact,0,fafmax_faf95_max_j" : ''
     """
     set -euo pipefail
     syn_flag=""
@@ -1736,7 +1736,7 @@ process VCF2MAF {
         --ncbi-build     GRCh38 \\
         --inhibit-vep \$enst_flag \\
         --retain-fmt     GT,AD,AF,DP \\
-        --retain-ann     ClinVar_CLNSIG,ClinVar_CLNREVSTAT,MAX_AF,gnomAD_fafmax_faf95_max_joint
+        --retain-ann     ClinVar_CLNSIG,ClinVar_CLNREVSTAT,MAX_AF,gnomAD_fafmax_faf95_max_j
 
 
     PY=\$(command -v python3 || echo /opt/conda/bin/python3)

@@ -35,13 +35,16 @@
 set -euo pipefail
 
 ###### GLOBAL VARIABLES
+## README layout: genomics_pipeline/{nextflow,references,containers,demo_subset}; this script is in nextflow/scripts/
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+R=${ROOT}/references
 BUNDLE_VERSION=1.0.0
-BUNDLE_DIR=/path/to/papio_test_bundle_v${BUNDLE_VERSION}
-DEMO_DIR=/path/to/demo_subset                  # output of make_demo_subset.sh
+BUNDLE_DIR=${ROOT}/test_bundle/papio_test_bundle_v${BUNDLE_VERSION}
+DEMO_DIR=${ROOT}/demo_subset                   # output of make_demo_subset.sh
 CPUS=8
 
 ## containers (same images the pipeline uses)
-CONTAINER_DIR=/path/to/papio_containers
+CONTAINER_DIR=${ROOT}/containers
 SIF_ALIGN=${CONTAINER_DIR}/bwa_samtools_fastp_fgbio_bcftools.sif   # samtools, bcftools, bwa-mem2
 SIF_GATK=${CONTAINER_DIR}/gatk.sif
 SIF_MSI=${CONTAINER_DIR}/msisensorpro.sif
@@ -49,27 +52,27 @@ SIF_STARFUSION=${CONTAINER_DIR}/starfusion.sif
 PREP_GENOME_LIB=/usr/local/src/STAR-Fusion/ctat-genome-lib-builder/prep_genome_lib.pl   # path inside SIF_STARFUSION
 
 ## full resources (your existing files)
-REF_FASTA=/path/to/papio_resources/genome/GRCh38.d1.vd1.fa
-ENSEMBL_GTF=/path/to/papio_resources/annotation/Homo_sapiens.GRCh38.115.gtf.gz
-VEP_CACHE_DIR=/path/to/papio_resources/vep_cache            # contains homo_sapiens/115_GRCh38/
+REF_FASTA=${R}/genome/GRCh38.d1.vd1.fa
+ENSEMBL_GTF=${R}/downloads/Homo_sapiens.GRCh38.115.gtf.gz   # Appendix A step 6.1 (setup.sh --full --keep-downloads keeps it)
+VEP_CACHE_DIR=${R}/vep_cache                                # contains homo_sapiens/115_GRCh38/
 VEP_CACHE_VERSION=115
-CTAT_LIB=/path/to/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.plug-n-play/ctat_genome_lib_build_dir
-CTAT_FUSION_ANNOT_LIB=/path/to/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.source/fusion_annot_lib.gz   # leave empty if absent
-CTAT_ANNOT_FILTER_RULE=/path/to/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.source/AnnotFilterRule.pm    # leave empty if absent
-REF_FUSIONS=/path/to/benchmark/reference_fusions.tsv        # GENE5<TAB>GENE3
+CTAT_LIB=${R}/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.plug-n-play/ctat_genome_lib_build_dir
+CTAT_FUSION_ANNOT_LIB=${R}/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.source/fusion_annot_lib.gz   # leave empty if absent
+CTAT_ANNOT_FILTER_RULE=${R}/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.source/AnnotFilterRule.pm    # leave empty if absent
+REF_FUSIONS=${R}/truth/reference_fusions.tsv                # GENE5<TAB>GENE3
 
-## VCF resources to cut:  <bundle file name>  <full path>
-VCFS="dbsnp.vcf.gz                /path/to/papio_resources/gatk/Homo_sapiens_assembly38.dbsnp138.vcf.gz
-mills.vcf.gz                      /path/to/papio_resources/gatk/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
-known_indels.vcf.gz               /path/to/papio_resources/gatk/Homo_sapiens_assembly38.known_indels.vcf.gz
-hapmap.vcf.gz                     /path/to/papio_resources/gatk/hapmap_3.3.hg38.vcf.gz
-omni.vcf.gz                       /path/to/papio_resources/gatk/1000G_omni2.5.hg38.vcf.gz
-thousandg_snps.vcf.gz             /path/to/papio_resources/gatk/1000G_phase1.snps.high_confidence.hg38.vcf.gz
-germline_resource.vcf.gz          /path/to/papio_resources/gatk/af-only-gnomad.hg38.vcf.gz
-panel_of_normals.vcf.gz           /path/to/papio_resources/gatk/1000g_pon.hg38.vcf.gz
-pileup_variants.vcf.gz            /path/to/papio_resources/gatk/small_exac_common_3.hg38.vcf.gz
-somalier_sites.vcf.gz             /path/to/papio_resources/somalier/sites.hg38.vcf.gz
-clinvar.vcf.gz                    /path/to/papio_resources/clinvar/clinvar_YYYYMMDD.vcf.gz"
+## VCF resources to cut:  <bundle file name>  <full path>  (set the ClinVar date of your download)
+VCFS="dbsnp.vcf.gz                ${R}/gatk/Homo_sapiens_assembly38.dbsnp138.vcf.gz
+mills.vcf.gz                      ${R}/gatk/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
+known_indels.vcf.gz               ${R}/gatk/Homo_sapiens_assembly38.known_indels.vcf.gz
+hapmap.vcf.gz                     ${R}/gatk/hapmap_3.3.hg38.vcf.gz
+omni.vcf.gz                       ${R}/gatk/1000G_omni2.5.hg38.vcf.gz
+thousandg_snps.vcf.gz             ${R}/gatk/1000G_phase1.snps.high_confidence.hg38.vcf.gz
+germline_resource.vcf.gz          ${R}/gatk/af-only-gnomad.hg38.vcf.gz
+panel_of_normals.vcf.gz           ${R}/gatk/1000g_pon.hg38.vcf.gz
+pileup_variants.vcf.gz            ${R}/gatk/small_exac_common_3.hg38.vcf.gz
+somalier_sites.vcf.gz             ${R}/somalier/sites.hg38.vcf.gz
+clinvar.vcf.gz                    ${R}/clinvar/clinvar_YYYYMMDD.vcf.gz"
 
 EXON_PAD=100        # call-region padding (bp), same as the full run
 SCATTER_N=4

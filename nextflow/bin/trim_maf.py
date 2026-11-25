@@ -17,7 +17,7 @@ if germline:
             "Transcript_ID","Exon_Number","t_GT","n_GT","n_depth","n_ref_count","n_alt_count",
             "Allele","Protein_position","Amino_acids","Codons","EXON","INTRON","Normal_VAF",
             "all_effects","Feature","FILTER","CLIN_SIG","ClinVar_CLNSIG","ClinVar_CLNREVSTAT","MAX_AF",
-            "gnomAD_fafmax_faf95_max_joint"]
+            "gnomAD_fafmax_faf95_max_j"]
     computed = {"Normal_VAF"}
 else:
     want = ["Hugo_Symbol","Gene","dbSNP_RS","NCBI_Build","Chromosome",

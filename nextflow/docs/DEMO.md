@@ -19,7 +19,8 @@ comparable with the manuscript's benchmark numbers.
 ## 1. Test run (users and reviewers)
 
 ```bash
-git clone https://github.com/chauhan2987/PAPIO && cd PAPIO
+git clone https://github.com/chauhan2987/PAPIO.git genomics_pipeline
+cd genomics_pipeline/nextflow                 # every command in this file runs from here
 bash setup.sh --test ~/papio_test              # containers + test bundle + params files
 
 bash scripts/check_installation.sh ~/papio_test/params_test_somatic.yaml
