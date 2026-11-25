@@ -290,9 +290,19 @@ if [ "$ASSAY" = "rna" ]; then
     fi
     runs metrics && { chk_file refflat opt "RNA-seq metrics skipped"; chk_file rrna_interval_list opt "%rRNA skipped"; }
     if runs mapping; then
-        SI2=$(yget salmon_index)
-        if [ -n "$SI2" ]; then [ -s "${SI2}/versionInfo.json" ] && pass "salmon_index" || fail "salmon_index: no Salmon index in $SI2"
-        else miss opt "salmon_index not set (Salmon quantification skipped)"; fi
+        [ -z "$(yget salmon_index)" ] || fail "salmon_index is no longer used: remove it and set salmon_transcripts (README Appendix A, step 8.7)"
+        TX=$(yget salmon_transcripts); GTFX=$(yget gtf)
+        [ "$(yget rna_use_ctat_reference true)" = true ] && GTFX="$(yget ctat_lib)/ref_annot.gtf"
+        if [ -z "$TX" ]; then miss opt "salmon_transcripts not set (Salmon quantification skipped)"
+        elif [ ! -s "$TX" ]; then fail "salmon_transcripts: $TX not found"
+        elif [ -s "$GTFX" ]; then
+            ## every transcript of the STAR index's GTF must be in the FASTA (else Salmon stops)
+            NMISS=$(awk -F'\t' 'NR == FNR { if (sub(/^>/, "")) { split($0, a, /[ \t]/); h[a[1]] = 1 }; next }
+                $3 == "exon" && match($9, /transcript_id "[^"]+"/) { t = substr($9, RSTART + 15, RLENGTH - 16); if (!(t in h) && !(t in seen)) { seen[t] = 1; n++ } }
+                END { print n + 0 }' "$TX" <(zcat -f "$GTFX"))
+            [ "$NMISS" -eq 0 ] && pass "salmon_transcripts matches the STAR index's GTF" \
+                || fail "salmon_transcripts lacks ${NMISS} transcripts of ${GTFX}: rebuild it from that GTF (scripts/gtf_to_transcripts.sh)"
+        else pass "salmon_transcripts"; fi
         T4=$(yget trust4_ref_dir)
         if [ -n "$T4" ]; then [ -s "${T4}/hg38_bcrtcr.fa" ] && [ -s "${T4}/human_IMGT+C.fa" ] && pass "trust4_ref_dir" \
             || fail "trust4_ref_dir: hg38_bcrtcr.fa / human_IMGT+C.fa missing in $T4"

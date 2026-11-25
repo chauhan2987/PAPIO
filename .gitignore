@@ -1,8 +1,9 @@
 # Containers dir
 envs
+containers
 
 # References die
-references
+references*
 
 # patch files
 *patch*

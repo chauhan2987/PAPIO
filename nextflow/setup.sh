@@ -27,8 +27,24 @@
 #            --check-urls        only check that every download URL answers, then exit
 #            --skip-url-check    do not check the URLs before downloading
 #            --keep-downloads    keep the downloaded archives after unpacking
-#            --no-salmon         skip the Salmon index (GENCODE v49 transcripts + genome decoys)
+#            --no-salmon         skip the Salmon transcript FASTA (salmon_transcripts: null; Salmon
+#                                quantifies STAR's transcriptome alignments, so it needs no index)
 #            --threads N         threads for index building (default: all, at most 16)
+#
+#   Layout under <dir> (the same as README Appendix A):
+#     containers/            *.sif
+#     params/                params files with the paths filled in
+#     references/downloads/  raw downloads (removed after use unless --keep-downloads)
+#     references/genome/     GRCh38.d1.vd1.fa(.fai) .dict, bwa_mem2/
+#     references/gatk/       GATK bundle VCFs restricted to the reference contigs (upstream names)
+#     references/somalier/ clinvar/ gnomad/ vep_cache/ vep_plugins/ cosmic/ annotsv/
+#     references/annotation/ gene, MANE CDS, arm and reportable-gene files
+#     references/sequenza/ msi/
+#     references/capture/<KIT>/  <KIT>_targets.bed, <KIT>_baits.bed, their .interval_list,
+#                            <KIT>_targets_pad100.bed.gz, scatter_24_pad100/, scatter_150_pad100/,
+#                            gcnv/ (and, built later, cnvkit_pon.cnn, inhouse_pon.vcf.gz)
+#     references/gencode/ star/ (StarIndex_gencode_v49/, gencode_v49_transcripts.fa) rna_qc/ ctat/ arriba/ fusion/ fusioncatcher/
+#     references/trust4/ telescope/ refphi/
 #
 #   Site overrides (mirrors, registry): export PAPIO_SETUP_CONF=<file>; the file is
 #   sourced after the defaults below and may redefine any of the URL variables.
@@ -69,7 +85,6 @@ URL_FUSIONCATCHER=https://sourceforge.net/projects/fusioncatcher/files/data
 URL_ANNOTSV=https://www.lbgi.fr/~geoffroy/Annotations/Annotations_Human_3.5.tar.gz
 URL_SOMALIER_LABELS=https://raw.githubusercontent.com/brentp/somalier/master/scripts/ancestry-labels-1kg.tsv
 URL_SOMALIER_1KG="https://zenodo.org/record/3479773/files/1kg.somalier.tar.gz?download=1"
-URL_GENCODE_TX=https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.transcripts.fa.gz
 URL_TRUST4=https://raw.githubusercontent.com/liulab-dfci/TRUST4/master
 URL_HERV=https://media.githubusercontent.com/media/mlbendall/telescope_annotation_db/master/builds/HERV_rmsk.hg38.v2/transcripts.gtf
 URL_REFPHI=https://raw.githubusercontent.com/humengying0907/InstaPrismSourceCode/main/refPhi/RCC_refPhi.RDS
@@ -158,7 +173,6 @@ full_urls() {
     done <<< "$GATK_VCFS"
     echo "$URL_SOMALIER_LABELS"; echo "$URL_SOMALIER_1KG"
     echo "${URL_TRUST4}/hg38_bcrtcr.fa"; echo "${URL_TRUST4}/human_IMGT+C.fa"; echo "$URL_HERV"; echo "$URL_REFPHI"
-    [ "$DO_SALMON" -eq 1 ] && echo "$URL_GENCODE_TX"
     [ "$DO_GNOMAD" -eq 1 ] && { echo "$URL_GNOMAD_FAF"; echo "${URL_GNOMAD_FAF}.tbi"; }
     [ "$DO_ANNOTSV" -eq 1 ] && echo "$URL_ANNOTSV"
     if [ "$DO_FUSIONCATCHER" -eq 1 ]; then for p in $FUSIONCATCHER_PARTS; do echo "${URL_FUSIONCATCHER}/${p}/download"; done; fi
@@ -245,7 +259,7 @@ make_rrna_list() {
 yset() {
     local f=$1 k=$2 v=$3
     if grep -qE "^${k}[[:space:]]*:" "$f"; then
-        awk -v k="$k" -v v="$v" '$0 ~ "^" k "[[:space:]]*:" { sub(/:.*/, ": " v) } { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+        awk -v k="$k" -v v="$v" '$0 ~ "^" k "[[:space:]]*:" { sub(/:.*/, ": " v) } { print }' "$f" > "${f}.tmp" || die "cannot update $f"; mv "${f}.tmp" "$f"
     else
         printf '%s : %s\n' "$k" "$v" >> "$f"
     fi
@@ -265,14 +279,14 @@ clean_bed() {
 make_kit() {
     local C="${R}/capture/${KIT_ID}" g d i n bad
     mkdir -p "$C"
-    clean_bed "$KIT_REGIONS" "${C}/${KIT_ID}_Regions.sorted.bed"
-    clean_bed "$KIT_PROBES"  "${C}/${KIT_ID}_probes.sorted.bed"
+    clean_bed "$KIT_REGIONS" "${C}/${KIT_ID}_targets.bed"
+    clean_bed "$KIT_PROBES"  "${C}/${KIT_ID}_baits.bed"
     ## contig names must be those of the reference (chr1, not 1)
-    bad=$(cut -f1 "${C}/${KIT_ID}_Regions.sorted.bed" "${C}/${KIT_ID}_probes.sorted.bed" | sort -u \
+    bad=$(cut -f1 "${C}/${KIT_ID}_targets.bed" "${C}/${KIT_ID}_baits.bed" | sort -u \
           | awk -F'\t' 'NR == FNR { ok[$1] = 1; next } !($1 in ok)' <(sed -n 's/^@SQ.*SN:\([^[:space:]]*\).*/\1/p' "$DICT") - | head -n 3 || true)
     [ -z "$bad" ] || die "kit BED contigs not in the reference: $(echo $bad) (UCSC chr names expected)"
-    [ -s "${C}/${KIT_ID}_baits.interval_list" ] || sx gatk gatk BedToIntervalList -I "${C}/${KIT_ID}_probes.sorted.bed" -SD "$DICT" -O "${C}/${KIT_ID}_baits.interval_list"
-    [ -s "${C}/${KIT_ID}_targets.interval_list" ] || sx gatk gatk BedToIntervalList -I "${C}/${KIT_ID}_Regions.sorted.bed" -SD "$DICT" -O "${C}/${KIT_ID}_targets.interval_list"
+    [ -s "${C}/${KIT_ID}_baits.interval_list" ] || sx gatk gatk BedToIntervalList -I "${C}/${KIT_ID}_baits.bed" -SD "$DICT" -O "${C}/${KIT_ID}_baits.interval_list"
+    [ -s "${C}/${KIT_ID}_targets.interval_list" ] || sx gatk gatk BedToIntervalList -I "${C}/${KIT_ID}_targets.bed" -SD "$DICT" -O "${C}/${KIT_ID}_targets.interval_list"
     ## padded calling shards: targets +-100 bp, overlaps merged, no target split between shards
     for n in 24 150; do
         d="${C}/scatter_${n}_pad100"
@@ -283,11 +297,11 @@ make_kit() {
         mv "${d}.tmp" "$d"
     done
     ## call regions for Strelka2 / Manta, built from the somatic shards
-    if [ ! -s "${C}/${KIT_ID}_Regions.pad100.bed.gz.tbi" ]; then
+    if [ ! -s "${C}/${KIT_ID}_targets_pad100.bed.gz.tbi" ]; then
         grep -hv '^@' "${C}"/scatter_24_pad100/*.interval_list | awk 'BEGIN { OFS = "\t" } { print $1, $2 - 1, $3 }' \
-            | LC_ALL=C sort -k1,1 -k2,2n | merge3 > "${C}/${KIT_ID}_Regions.pad100.bed"
-        sx align bgzip -f "${C}/${KIT_ID}_Regions.pad100.bed"
-        sx align tabix -f -p bed "${C}/${KIT_ID}_Regions.pad100.bed.gz"
+            | LC_ALL=C sort -k1,1 -k2,2n | merge3 > "${C}/${KIT_ID}_targets_pad100.bed"
+        sx align bgzip -f "${C}/${KIT_ID}_targets_pad100.bed"
+        sx align tabix -f -p bed "${C}/${KIT_ID}_targets_pad100.bed.gz"
     fi
     ## germline copy-number (gCNV) intervals; run_gcnv itself stays off (needs >= 30 normals)
     g="${C}/gcnv"; mkdir -p "$g"
@@ -331,10 +345,10 @@ write_full_params() {
         if [ -n "$KIT_ID" ]; then
             case "$f" in *rna_fusion*) ;;
                 *)  C="${R}/capture/${KIT_ID}"
-                    yset "$out" interval_bed         "${C}/${KIT_ID}_Regions.sorted.bed"
+                    yset "$out" interval_bed         "${C}/${KIT_ID}_targets.bed"
                     yset "$out" bait_interval_list   "${C}/${KIT_ID}_baits.interval_list"
                     yset "$out" target_interval_list "${C}/${KIT_ID}_targets.interval_list"
-                    yset "$out" call_regions_gz      "${C}/${KIT_ID}_Regions.pad100.bed.gz"
+                    yset "$out" call_regions_gz      "${C}/${KIT_ID}_targets_pad100.bed.gz"
                     yset "$out" scatter_intervals    "${C}/scatter_24_pad100"
                     yset "$out" germline_scatter_intervals "${C}/scatter_150_pad100"
                     case "$f" in *germline*)
@@ -350,7 +364,7 @@ write_full_params() {
             case "$f" in *rna_fusion*) ;; *) yset "$out" cosmic_vcf "${R}/cosmic/cosmic_genome_screens_${COSMIC_VERSION}_chr_dedup.vcf.gz" ;; esac
         fi
         for k in gnomad_faf_vcf annotsv_dir fusioncatcher_db verifybamid_db cnvkit_pon cosmic_vcf cosmic_cgc_tsv \
-                 salmon_index trust4_ref_dir telescope_gtf somalier_ancestry_labels somalier_1kg_dir coverage_report_bed germline_report_genes; do
+                 salmon_transcripts trust4_ref_dir telescope_gtf somalier_ancestry_labels somalier_1kg_dir coverage_report_bed germline_report_genes; do
             v=$(yget "$out" "$k")
             if [ -n "$v" ] && [ "$v" != null ] && [ ! -e "$v" ]; then yset "$out" "$k" "null    # not found by setup.sh: $v"; fi
         done
@@ -432,7 +446,7 @@ if [ "$MODE" = "test" ]; then
     for z in "${BUNDLE}"/reference/*.fa.gz; do
         [ -e "$z" ] || continue
         FA=${z%.gz}; CH=$(basename "$FA" .fa)
-        [ -s "$FA" ] || { gzip -dc "$z" > "${FA}.tmp" && mv "${FA}.tmp" "$FA"; }
+        [ -s "$FA" ] || { gzip -dc "$z" > "${FA}.tmp" || die "cannot unpack $z"; mv "${FA}.tmp" "$FA"; }
         mkdir -p "${BUNDLE}/reference/bwa_mem2"
         [ -s "${BUNDLE}/reference/bwa_mem2/${CH}.fa.bwt.2bit.64" ] || sx align bwa-mem2 index -p "${BUNDLE}/reference/bwa_mem2/${CH}.fa" "$FA"
     done
@@ -483,7 +497,7 @@ if [ "$DO_COSMIC" -eq 1 ]; then
     COSMIC_AUTH=$(printf '%s:%s' "$CE" "$CP" | base64 | tr -d '\n')
 fi
 R="${DIR}/references"; DL="${R}/downloads"
-mkdir -p "$R"/{genome,gatk,somalier,clinvar,annotation,vep_cache,vep_plugins,msi,sequenza,gencode,star,rna_qc,ctat,arriba,fusion} "$DL"
+mkdir -p "$R"/{genome,gatk,somalier,clinvar,gnomad,annotation,vep_cache,vep_plugins,msi,sequenza,gencode,star,rna_qc,ctat,arriba,fusion} "$DL"
 df -Pk "$R" | awk 'NR == 2 && $4 < 300 * 1024 * 1024 { printf "  WARN: %.0f GB free under %s; the full setup needs about 300 GB\n", $4 / 1048576, $6 }'
 G="${R}/genome"; REF="${G}/GRCh38.d1.vd1.fa"; DICT="${G}/GRCh38.d1.vd1.dict"
 
@@ -539,7 +553,7 @@ fi
 
 if [ "$DO_GNOMAD" -eq 1 ]; then
     step "gnomAD v4.1 filtering allele frequency (33.6 GB)"
-    GF="${R}/annotation/variantsGnomADv4.1Joint.vcf.bgz"
+    GF="${R}/gnomad/variantsGnomADv4.1Joint.vcf.bgz"
     if [ ! -s "${GF}.tbi" ] || [ -e "${GF}.part" ]; then
         fetch "$URL_GNOMAD_FAF" "$GF"
         [ "$(md5sum "$GF" | cut -d' ' -f1)" = "$GNOMAD_FAF_MD5" ] || die "MD5 mismatch for $GF - delete it and re-run"
@@ -601,9 +615,9 @@ fi
 
 step "Sequenza GC wiggle and MSIsensor-pro site list"
 SQ="${R}/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz"
-[ -s "$SQ" ] || { sx sequenza sequenza-utils gc_wiggle --fasta "$REF" -w 50 -o "${SQ}.tmp.gz" && mv "${SQ}.tmp.gz" "$SQ"; }
+[ -s "$SQ" ] || { sx sequenza sequenza-utils gc_wiggle --fasta "$REF" -w 50 -o "${SQ}.tmp.gz" || die "Sequenza gc_wiggle failed"; mv "${SQ}.tmp.gz" "$SQ"; }
 MS="${R}/msi/GRCh38.d1.vd1.msisensor.list"
-[ -s "$MS" ] || { sx msisensor msisensor-pro scan -d "$REF" -o "${MS}.tmp" && mv "${MS}.tmp" "$MS"; }
+[ -s "$MS" ] || { sx msisensor msisensor-pro scan -d "$REF" -o "${MS}.tmp" || die "MSIsensor-pro scan failed"; mv "${MS}.tmp" "$MS"; }
 
 if [ -n "$KIT_ID" ]; then
     step "capture kit ${KIT_ID}: interval lists, calling shards, call regions, gCNV intervals"
@@ -646,7 +660,7 @@ step "RNA: GENCODE v49 STAR index (~40 GB RAM), refFlat, rRNA list; CTAT v44; Ar
 GTF49="${R}/gencode/gencode.v49.annotation.gtf"
 if [ ! -s "$GTF49" ]; then
     fetch "$URL_GENCODE_GTF" "${DL}/gencode.v49.annotation.gtf.gz"
-    zcat "${DL}/gencode.v49.annotation.gtf.gz" > "${GTF49}.tmp" && mv "${GTF49}.tmp" "$GTF49"
+    zcat "${DL}/gencode.v49.annotation.gtf.gz" > "${GTF49}.tmp" || die "cannot unpack the GENCODE GTF"; mv "${GTF49}.tmp" "$GTF49"
 fi
 SI="${R}/star/StarIndex_gencode_v49"
 if [ ! -s "${SI}/SA" ] || [ ! -s "${SI}/genomeParameters.txt" ]; then
@@ -655,6 +669,15 @@ if [ ! -s "${SI}/SA" ] || [ ! -s "${SI}/genomeParameters.txt" ]; then
         --sjdbGTFfile "$GTF49" --sjdbOverhang 100 --limitGenomeGenerateRAM 60000000000 --outTmpDir "${SI}/_tmp" \
         ${STAR_GENOME_EXTRA}
     rm -rf "${SI}/_tmp"
+fi
+## Salmon transcript FASTA: same GTF + genome as the STAR index (Salmon quantifies STAR's
+## transcriptome alignments; every transcript of that BAM must be in the FASTA)
+TXFA="${R}/star/gencode_v49_transcripts.fa"
+if [ "$DO_SALMON" -eq 1 ] && [ ! -s "$TXFA" ]; then
+    cp "${PIPELINE_DIR}/scripts/gtf_to_transcripts.sh" "${DL}/gtf_to_transcripts.sh"     # inside the bound folder
+    TMPDIR="$DL" sx align bash "${DL}/gtf_to_transcripts.sh" --gtf "$GTF49" --fasta "$REF" --out "$TXFA" \
+        || die "transcript FASTA for Salmon not built"
+    rm -f "${DL}/gtf_to_transcripts.sh"
 fi
 [ -s "${R}/rna_qc/gencode.v49.refFlat" ]           || make_refflat "$GTF49" "${R}/rna_qc/gencode.v49.refFlat"
 [ -s "${R}/rna_qc/gencode.v49.rrna.interval_list" ] || make_rrna_list "$GTF49" "$DICT" "${R}/rna_qc/gencode.v49.rrna.interval_list"
@@ -685,23 +708,6 @@ fetch "$URL_REFPHI"                     "${R}/refphi/RCC_refPhi.RDS"
 grep -q '^>' "${R}/trust4/hg38_bcrtcr.fa" || die "${R}/trust4/hg38_bcrtcr.fa is not a FASTA"
 awk -F'\t' '!/^#/ { exit !($3 != "") }' "${R}/telescope/HERV_rmsk.hg38.v2.gtf" || die "HERV GTF looks wrong (Git LFS pointer?)"
 
-if [ "$DO_SALMON" -eq 1 ]; then
-    step "Salmon index: GENCODE v49 transcripts + genome decoys (~20 GB RAM)"
-    SA="${R}/salmon"; SX_IDX="${SA}/SalmonIndex_gencode_v49"; mkdir -p "$SA"
-    if [ ! -s "${SX_IDX}/versionInfo.json" ]; then
-        fetch "$URL_GENCODE_TX" "${DL}/gencode.v49.transcripts.fa.gz"
-        ## decoys: every genome sequence except the primary chromosomes (unplaced, unlocalized, decoy, viral)
-        grep '^>' "$REF" | cut -d ' ' -f 1 | sed 's/^>//' | { grep -v '^chr[0-9XYM]*$' || true; } > "${SA}/decoys.txt"
-        ## gentrome: transcripts first, then the genome
-        { cat "${DL}/gencode.v49.transcripts.fa.gz"; gzip -c "$REF"; } > "${SA}/gentrome_v49.fa.gz"
-        rm -rf "$SX_IDX"
-        DEC=(); [ -s "${SA}/decoys.txt" ] && DEC=(-d "${SA}/decoys.txt")    # no decoys only on a primary-only genome
-        sx salmon salmon index -t "${SA}/gentrome_v49.fa.gz" "${DEC[@]}" --gencode -k 31 -p "$THREADS" -i "$SX_IDX"
-        [ -s "${SX_IDX}/versionInfo.json" ] || die "Salmon index not built"
-        rm -f "${SA}/gentrome_v49.fa.gz"; [ "$KEEP" -eq 1 ] || rm -f "${DL}/gencode.v49.transcripts.fa.gz"
-    fi
-fi
-
 if [ "$DO_FUSIONCATCHER" -eq 1 ] && [ ! -d "${R}/fusioncatcher/human_v102" ]; then
     step "FusionCatcher human_v102 (~30 GB)"
     mkdir -p "${R}/fusioncatcher"
@@ -729,7 +735,7 @@ Still needed (cannot be downloaded automatically); the params files point at the
   2. demonstration FASTQs: bash ${PIPELINE_DIR}/scripts/download_demo_fastq.sh ${DIR}/demo
      (or set dna_samplesheet / rna_samplesheet and fastq_root to your own data)
   3. optional, set to null until present: CNVkit panel of normals for the kit, VerifyBamID2 resource,
-     in-house Mutect2 panel of normals (main_pon.nf, from your normals; README Appendix A, step 3.4)$( [ "$DO_COSMIC" -eq 1 ] || echo ", COSMIC (--cosmic)")$( [ "$DO_ANNOTSV" -eq 1 ] || echo ", AnnotSV annotations")$( [ "$DO_GNOMAD" -eq 1 ] || echo ", gnomAD filtering AF")$( [ "$DO_SALMON" -eq 1 ] || echo ", Salmon index")
+     in-house Mutect2 panel of normals (main_pon.nf, from your normals; README Appendix A, step 3.4)$( [ "$DO_COSMIC" -eq 1 ] || echo ", COSMIC (--cosmic)")$( [ "$DO_ANNOTSV" -eq 1 ] || echo ", AnnotSV annotations")$( [ "$DO_GNOMAD" -eq 1 ] || echo ", gnomAD filtering AF")$( [ "$DO_SALMON" -eq 1 ] || echo ", Salmon transcript FASTA (--no-salmon)")
   4. reportable genes: ${R}/annotation/reportable_genes.txt holds the README example list (RCC);
      edit it and re-run setup to rebuild the per-gene coverage BED
 Then check and run:

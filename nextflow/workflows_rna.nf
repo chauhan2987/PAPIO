@@ -166,12 +166,13 @@ workflow RNA_WORKFLOW {
         ch_star_log = channel.empty()
     }
 
-    // -- Salmon quantification (independent of the fusion path) -----------
-    //   Gated on salmon_index only: ch_reads is built unconditionally, so this
-    //   also runs on re-entry runs without re-running STAR.
+    // -- Salmon quantification on STAR's transcriptome alignments ----------
+    //   Needs this run's STAR (the transcriptome BAM is not kept), so a re-entry run
+    //   (mapping stage skipped) has no Salmon. salmon_transcripts: transcript FASTA from the
+    //   same gtf + genome as the STAR index (bin/gtf_to_transcripts.sh).
     ch_salmon_qc = channel.empty()
-    if (params.salmon_index) {
-        SALMON_QUANT(ch_reads, toFileChannel(params.salmon_index))
+    if (params.salmon_transcripts && stageRuns('mapping')) {
+        SALMON_QUANT(STAR_ALIGN.out.tx_bam, toFileChannel(params.salmon_transcripts))
         ch_salmon_qc = SALMON_QUANT.out.results.map { meta, d -> d }
     }
 

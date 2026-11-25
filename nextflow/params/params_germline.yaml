@@ -47,18 +47,20 @@ omni            : /path/to/papio_resources/gatk/1000G_omni2.5.hg38.vcf.gz
 thousandg_snps  : /path/to/papio_resources/gatk/1000G_phase1.snps.high_confidence.hg38.vcf.gz
 
 # ---- capture kit: Agilent SureSelect V6+UTR (S07604624) - demo ---------------
-interval_bed         : /path/to/papio_resources/capture/S07604624/S07604624_Covered.bed
-bait_interval_list   : /path/to/papio_resources/capture/S07604624/S07604624_Padded.interval_list
-target_interval_list : /path/to/papio_resources/capture/S07604624/S07604624_Covered.interval_list
-call_regions_gz      : /path/to/papio_resources/capture/S07604624/S07604624_pad100.bed.gz
-scatter_intervals    : /path/to/papio_resources/capture/S07604624/Scatter_Intervals_Dir_pad100
+interval_bed         : /path/to/papio_resources/capture/S07604624/S07604624_targets.bed
+bait_interval_list   : /path/to/papio_resources/capture/S07604624/S07604624_baits.interval_list
+target_interval_list : /path/to/papio_resources/capture/S07604624/S07604624_targets.interval_list
+call_regions_gz      : /path/to/papio_resources/capture/S07604624/S07604624_targets_pad100.bed.gz
+scatter_intervals    : /path/to/papio_resources/capture/S07604624/scatter_24_pad100
+germline_scatter_intervals : /path/to/papio_resources/capture/S07604624/scatter_150_pad100
 
 # ---- capture kit: Agilent SureSelect V7 (S31285117) - own cohort -------------
-# interval_bed         : /path/to/papio_resources/capture/S31285117/S31285117_Covered.bed
-# bait_interval_list   : /path/to/papio_resources/capture/S31285117/S31285117_Padded.interval_list
-# target_interval_list : /path/to/papio_resources/capture/S31285117/S31285117_Covered.interval_list
-# call_regions_gz      : /path/to/papio_resources/capture/S31285117/S31285117_pad100.bed.gz
-# scatter_intervals    : /path/to/papio_resources/capture/S31285117/Scatter_Intervals_Dir_pad100
+# interval_bed         : /path/to/papio_resources/capture/S31285117/S31285117_targets.bed
+# bait_interval_list   : /path/to/papio_resources/capture/S31285117/S31285117_baits.interval_list
+# target_interval_list : /path/to/papio_resources/capture/S31285117/S31285117_targets.interval_list
+# call_regions_gz      : /path/to/papio_resources/capture/S31285117/S31285117_targets_pad100.bed.gz
+# scatter_intervals    : /path/to/papio_resources/capture/S31285117/scatter_24_pad100
+# germline_scatter_intervals : /path/to/papio_resources/capture/S31285117/scatter_150_pad100
 
 # ---- QC ----------------------------------------------------------------------
 verifybamid_db : /path/to/papio_resources/verifybamid2/1000g.phase3.100k.b38
@@ -72,7 +74,7 @@ vep_cache_dir     : /path/to/papio_resources/vep_cache
 vep_cache_version : 115
 vep_plugins_dir   : /path/to/papio_resources/vep_plugins
 clinvar_vcf       : /path/to/papio_resources/clinvar/clinvar_YYYYMMDD.vcf.gz
-gnomad_faf_vcf    : /path/to/papio_resources/annotation/variantsGnomADv4.1Joint.vcf.bgz   # gnomAD v4.1 filtering AF (README Appendix A, step 7.6)
+gnomad_faf_vcf    : /path/to/papio_resources/gnomad/variantsGnomADv4.1Joint.vcf.bgz   # gnomAD v4.1 filtering AF (README Appendix A, step 7.6)
 germline_report_genes : /path/to/papio_resources/annotation/reportable_genes.txt   # germline LoF report gene list (edit for your study)
 annotsv_dir       : /path/to/papio_resources/annotsv
 

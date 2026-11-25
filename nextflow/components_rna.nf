@@ -63,6 +63,8 @@ process STAR_ALIGN {
     path  "${meta.sample_id}.SJ.out.tab",                              emit: sj
     // Gene counts (cols 2/3/4 = unstranded / fwd / rev strand) from the GTF STAR loaded.
     tuple val(meta), path("${meta.sample_id}.ReadsPerGene.out.tab"),  emit: gene_counts
+    // Transcriptome alignments for Salmon (salmon_transcripts set); work directory only, not published.
+    tuple val(meta), path("${meta.sample_id}.Aligned.toTranscriptome.out.bam"), optional: true, emit: tx_bam
 
 
     script:
@@ -77,6 +79,11 @@ process STAR_ALIGN {
     def rf_cmd       = r1_first.endsWith('.gz') ? '--readFilesCommand zcat' : ''
     def twopass      = (params.star_twopass == false) ? 'None' : 'Basic'
     def rg_line      = "ID:${meta.sample_id} SM:${meta.sample_id} LB:${meta.batch} PL:ILLUMINA"
+    // Salmon input: transcriptome BAM keeping alignments with indels and soft-clips (soft-clips
+    // extended); only pairs aligned as pairs (BanSingleEnd). STAR >= 2.7.11a option.
+    def quant_mode   = params.salmon_transcripts
+                       ? '--quantMode TranscriptomeSAM GeneCounts --quantTranscriptomeSAMoutput BanSingleEnd_ExtendSoftclip'
+                       : '--quantMode GeneCounts'
 
     // -- Chimeric-detection strategy (VERIFIED against STAR issue #1288 + Arriba wiki) --
     //   STAR's NEW chimeric detection (--chimMultimapNmax > 0) ONLY works with
@@ -112,7 +119,7 @@ process STAR_ALIGN {
         --outSAMunmapped Within --outBAMcompression 6 \\
         --outSAMattrRGline ${rg_line} \\
         --twopassMode ${twopass} \\
-        --quantMode GeneCounts \\
+        ${quant_mode} \\
         --outFilterMultimapNmax 50 ${pe_overlap} \\
         --alignSplicedMateMapLminOverLmate 0.5 \\
         --alignSJstitchMismatchNmax 5 -1 5 5 \\
@@ -144,45 +151,38 @@ process STAR_ALIGN {
 // ============================================================
 //  STAGE 1 mapping: SALMON_QUANT - transcript quantification - Salmon (expression only)
 //
-//  Selective alignment to a decoy-aware GENCODE index (transcripts + full
-//  GRCh38.d1.vd1 as decoys), built once outside the pipeline with the SAME
-//  Salmon version. Reads the raw FASTQs in parallel with STAR, so the fusion
-//  path is untouched. Multi-lane/chunk safe: Salmon takes space-separated file
-//  lists per mate. Library type is inferred (-l A); lib_format_counts.json must
-//  agree across the cohort.
+//  Alignment mode on STAR's Aligned.toTranscriptome.out.bam (as nf-core/rnaseq
+//  star_salmon): no second pass over the reads and no Salmon index (a few GB of
+//  memory instead of ~20 GB). The transcript FASTA (salmon_transcripts) must be built
+//  from the same gtf + genome as the STAR index (bin/gtf_to_transcripts.sh): Salmon
+//  stops on a transcript of the BAM missing from it. Library type inferred (-l A).
+//  Fragment-GC bias needs pairs.
 // ============================================================
 
 process SALMON_QUANT {
     tag { "${meta.sample_id}" }
     label 'process_medium'
 
-    // memory { 32.GB * task.attempt }      // decoy-aware index is ~20 GB resident
-    // time   { 4.h   * task.attempt }
-
     // -- 01 mapping -----------------------------------------------------
     publishDir { "${pubDir('mapping', true)}/salmon" }, mode: 'copy'
 
     input:
-    tuple val(meta), path(reads1), path(reads2)
-    path  salmon_index
+    tuple val(meta), path(tx_bam)
+    path  transcripts
 
     output:
     tuple val(meta), path("${meta.sample_id}"), emit: results
 
     script:
-    def r1        = (reads1 instanceof List ? reads1 : [reads1]).join(' ')
-    def r2        = reads2 ? (reads2 instanceof List ? reads2 : [reads2]).join(' ') : ''
-    def read_args = r2 ? "-1 ${r1} -2 ${r2}" : "-r ${r1}"
-    def gc_flag   = r2 ? '--gcBias' : ''   // fragment GC model needs pairs
+    def gc_flag = meta.single_end ? '' : '--gcBias'
     """
     set -euo pipefail
 
     salmon --no-version-check quant \\
-        -i ${salmon_index} \\
+        -t ${transcripts} \\
         -l A \\
-        ${read_args} \\
+        -a ${tx_bam} \\
         --seqBias ${gc_flag} \\
-        --softclip \\
         -p ${task.cpus} \\
         -o ${meta.sample_id}
     """

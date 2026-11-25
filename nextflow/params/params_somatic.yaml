@@ -43,18 +43,18 @@ mills           : /path/to/papio_resources/gatk/Mills_and_1000G_gold_standard.in
 known_indels    : /path/to/papio_resources/gatk/Homo_sapiens_assembly38.known_indels.vcf.gz
 
 # ---- capture kit: Agilent SureSelect V6+UTR (S07604624) - demo ---------------
-interval_bed         : /path/to/papio_resources/capture/S07604624/S07604624_Covered.bed
-bait_interval_list   : /path/to/papio_resources/capture/S07604624/S07604624_Padded.interval_list
-target_interval_list : /path/to/papio_resources/capture/S07604624/S07604624_Covered.interval_list
-call_regions_gz      : /path/to/papio_resources/capture/S07604624/S07604624_pad100.bed.gz
-scatter_intervals    : /path/to/papio_resources/capture/S07604624/Scatter_Intervals_Dir_pad100
+interval_bed         : /path/to/papio_resources/capture/S07604624/S07604624_targets.bed
+bait_interval_list   : /path/to/papio_resources/capture/S07604624/S07604624_baits.interval_list
+target_interval_list : /path/to/papio_resources/capture/S07604624/S07604624_targets.interval_list
+call_regions_gz      : /path/to/papio_resources/capture/S07604624/S07604624_targets_pad100.bed.gz
+scatter_intervals    : /path/to/papio_resources/capture/S07604624/scatter_24_pad100
 
 # ---- capture kit: Agilent SureSelect V7 (S31285117) - own cohort -------------
-# interval_bed         : /path/to/papio_resources/capture/S31285117/S31285117_Covered.bed
-# bait_interval_list   : /path/to/papio_resources/capture/S31285117/S31285117_Padded.interval_list
-# target_interval_list : /path/to/papio_resources/capture/S31285117/S31285117_Covered.interval_list
-# call_regions_gz      : /path/to/papio_resources/capture/S31285117/S31285117_pad100.bed.gz
-# scatter_intervals    : /path/to/papio_resources/capture/S31285117/Scatter_Intervals_Dir_pad100
+# interval_bed         : /path/to/papio_resources/capture/S31285117/S31285117_targets.bed
+# bait_interval_list   : /path/to/papio_resources/capture/S31285117/S31285117_baits.interval_list
+# target_interval_list : /path/to/papio_resources/capture/S31285117/S31285117_targets.interval_list
+# call_regions_gz      : /path/to/papio_resources/capture/S31285117/S31285117_targets_pad100.bed.gz
+# scatter_intervals    : /path/to/papio_resources/capture/S31285117/scatter_24_pad100
 
 # ---- somatic calling ---------------------------------------------------------
 germline_resource : /path/to/papio_resources/gatk/af-only-gnomad.hg38.vcf.gz
@@ -72,7 +72,7 @@ consensus_filter_mode       : tag     # tag = keep all, label sub-threshold LOWC
 somatic_filter_mode         : tag     # tag = keep all, label failing filters
 
 # ---- CNV / purity / MSI / QC (each optional; step skipped if unset) -----------
-cnvkit_pon         : /path/to/papio_resources/cnvkit/S07604624_pon.cnn   # must be built for the SAME capture kit
+cnvkit_pon         : /path/to/papio_resources/capture/S07604624/cnvkit_pon.cnn   # must be built for the SAME capture kit
 msisensor_list     : /path/to/papio_resources/msi/GRCh38.d1.vd1.msisensor.list
 sequenza_gc_wiggle : /path/to/papio_resources/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz
 gene_bed           : /path/to/papio_resources/annotation/ensembl115_genes.bed
@@ -89,10 +89,10 @@ vep_cache_dir     : /path/to/papio_resources/vep_cache
 vep_cache_version : 115
 vep_plugins_dir   : /path/to/papio_resources/vep_plugins
 clinvar_vcf       : /path/to/papio_resources/clinvar/clinvar_YYYYMMDD.vcf.gz
-gnomad_faf_vcf    : /path/to/papio_resources/annotation/variantsGnomADv4.1Joint.vcf.bgz   # gnomAD v4.1 filtering AF (README Appendix A, step 7.6)
+gnomad_faf_vcf    : /path/to/papio_resources/gnomad/variantsGnomADv4.1Joint.vcf.bgz   # gnomAD v4.1 filtering AF (README Appendix A, step 7.6)
 germline_report_genes : /path/to/papio_resources/annotation/reportable_genes.txt   # germline LoF report gene list (edit for your study)
-cosmic_vcf        : /path/to/papio_resources/cosmic/Cosmic_GenomeScreensMutant_GRCh38.vcf.gz   # COSMIC licence
-cosmic_cgc_tsv    : /path/to/papio_resources/cosmic/Cosmic_CancerGeneCensus_v101_GRCh38.tsv.gz  # COSMIC licence
+cosmic_vcf        : /path/to/papio_resources/cosmic/cosmic_genome_screens_v104_chr_dedup.vcf.gz   # COSMIC licence
+cosmic_cgc_tsv    : /path/to/papio_resources/cosmic/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz  # COSMIC licence
 annotsv_dir       : /path/to/papio_resources/annotsv
 
 # ---- scheduler ---------------------------------------------------------------

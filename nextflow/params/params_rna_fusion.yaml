@@ -46,7 +46,7 @@ refflat            : /path/to/papio_resources/rna_qc/gencode.v49.refFlat
 rrna_interval_list : /path/to/papio_resources/rna_qc/gencode.v49.rrna.interval_list
 
 # ---- expression and immune features (optional; each step runs when its resource is set) ----
-salmon_index   : /path/to/papio_resources/salmon/SalmonIndex_gencode_v49     # Salmon quantification (GENCODE v49, decoy-aware)
+salmon_transcripts : /path/to/papio_resources/star/gencode_v49_transcripts.fa   # Salmon on STAR's transcriptome alignments; same gtf + genome as star_index
 trust4_ref_dir : /path/to/papio_resources/trust4                             # TRUST4 TCR/BCR repertoire
 telescope_gtf  : /path/to/papio_resources/telescope/HERV_rmsk.hg38.v2.gtf    # Telescope HERV expression
 
@@ -61,7 +61,7 @@ arriba_known_fusions   : /path/to/papio_resources/arriba/known_fusions_hg38_GRCh
 arriba_protein_domains : /path/to/papio_resources/arriba/protein_domains_hg38_GRCh38_v2.5.1.gff3
 fusioncatcher_db       : /path/to/papio_resources/fusioncatcher/human_v102
 known_fusions_tsv      : /path/to/papio_resources/fusion/known_fusions.tsv
-cosmic_cgc_tsv         : /path/to/papio_resources/cosmic/Cosmic_CancerGeneCensus_v101_GRCh38.tsv.gz   # COSMIC licence
+cosmic_cgc_tsv         : /path/to/papio_resources/cosmic/Cosmic_CancerGeneCensus_v104_GRCh38.tsv.gz   # COSMIC licence
 
 # ---- consensus ---------------------------------------------------------------
 # fusion_min_callers: 2 = PASS_CONSENSUS needs >= 2 callers. Fusions below the
