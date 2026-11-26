@@ -20,7 +20,7 @@ include { RNA_WORKFLOW } from './workflows_rna'   // RNA fusion arm
 // Shared constants live in utils (single source of truth) so validation
 // here and execution in DNA_WORKFLOW can never disagree about stage order.
 include { stageRankMap; validStages; validAssays;
-          validAnalyses; validCallers; validDedupModes } from './utils'
+          validAnalyses; validCallers; validDedupModes; rnaStrandedness } from './utils'
 
 
 // ============================================================
@@ -88,6 +88,24 @@ def validateParams() {
     if (!validStages().contains(params.stop_at))
         error "ERROR: Invalid params.stop_at '${params.stop_at}'. One of: ${validStages().join(', ')}"
 
+    // Mode switches: a misspelt value must stop the run, not fall back silently (a misspelt
+    // consensus_filter_mode would drop sub-threshold calls instead of tagging them).
+    def enumParams = [
+        somatic_filter_mode  : ['tag', 'remove'],
+        consensus_filter_mode: ['tag', 'remove'],
+        consensus_backbone   : ['mutect2', 'union'],
+        joint_genotyper      : ['classic', 'gnarly'],
+        nv_tensor_type       : ['reference', 'read_tensor'],
+        manifest_checksum    : ['none', 'header', 'full'],
+        rna_strandedness     : ['auto', 'yes', 'no', 'unstranded', 'forward', 'reverse', 'fr', 'rf',
+                                'fr-firststrand', 'fr-secondstrand'],
+    ]
+    enumParams.each { k, allowed ->
+        def v = (k == 'rna_strandedness') ? rnaStrandedness() : params[k]
+        if (v != null && !(v.toString().toLowerCase() in allowed))
+            error "ERROR: Invalid params.${k} '${v}'. One of: ${allowed.join(', ')}"
+    }
+
     def startRank = stageRank()[params.start_at]
     def stopRank  = stageRank()[params.stop_at]
     if (startRank > stopRank)
@@ -98,7 +116,7 @@ def validateParams() {
         error "ERROR: params.bind_paths must be a non-empty LIST of directories the containers can " +
               "read/write (e.g. ['/home/groups/g/u', '/scratch/groups/g/u'])."
     params.bind_paths.each { bp ->
-        if (bp.toString() in ['/', '/home', '/scratch', '/data'])
+        if (java.nio.file.Paths.get(bp.toString()).normalize().toString() in ['/', '/home', '/scratch', '/data'])
             error "ERROR: bind_paths entry '${bp}' is a filesystem root. Bind your OWNED directory " +
                   "(e.g. /home/groups/<grp>/<user>), not a top-level mount."
     }
@@ -149,7 +167,7 @@ def validateParams() {
         error "ERROR: container paths start with 'null/' (${nullCtr.take(3).join(', ')}...) - params.container_dir was unset " +
               "when nextflow.config was read. Set container_dir in the params file (a later -c config is read too late)."
     def runOpts = workflow.session?.config?.navigate('singularity.runOptions')?.toString() ?: ''
-    def unbound = (params.bind_paths instanceof List ? params.bind_paths : []).findAll { bp -> !runOpts.contains("--bind ${bp}") }
+    def unbound = (params.bind_paths instanceof List ? params.bind_paths : []).findAll { bp -> !runOpts.contains("--bind ${java.nio.file.Paths.get(bp.toString()).normalize()}") }
     if (unbound)
         error "ERROR: bind_paths ${unbound} are missing from singularity.runOptions ('${runOpts}'). " +
               "Set bind_paths in the params file (a later -c config is read too late)."
@@ -161,7 +179,7 @@ def validateParams() {
     // -- Mid-pipeline entry: require the staged-input directory -
     if (params.start_at == 'annotation') {
         if (!params.input_vcf_dir)
-            error "ERROR: params.start_at='annotation' requires params.input_vcf_dir (dir of <sample>.vcf.gz)."
+            error "ERROR: params.start_at='annotation' requires params.input_vcf_dir (dir of <sample>.vcf.gz or <sample>_filtered.vcf.gz)."
     } else if (params.start_at == 'classification') {
         if (!params.input_annot_dir)
             error "ERROR: params.start_at='classification' requires params.input_annot_dir (dir of <sample>_vep.vcf.gz)."

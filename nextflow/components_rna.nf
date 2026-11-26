@@ -3,7 +3,7 @@ nextflow.enable.dsl = 2
 
 // Shared JVM-options helper (single source of truth in utils), same import
 // idiom as components_common / _somatic / _germline.
-include { gatkJavaOpts; pubDir } from './utils'
+include { gatkJavaOpts; pubDir; rnaStrandedness } from './utils'
 
 // ============================================================
 //  components_rna.nf  -  RNA fusion process definitions
@@ -223,9 +223,10 @@ process RNASEQ_METRICS {
     def java_opts = gatkJavaOpts(task)
     // STRAND per library prep. 'auto' = infer from STAR gene counts (col3 = read-1 sense,
     // col4 = read-1 antisense); without counts (re-entry) 'auto' falls back to NONE.
-    def strand = (params.rna_strandedness ?: 'auto').toString().toLowerCase()
+    def strand = rnaStrandedness()
+    // same vocabulary as ARRIBA (yes = forward-stranded, as Arriba's -s yes)
     def strand_spec = strand in ['reverse','rf','fr-firststrand'] ? 'SECOND_READ_TRANSCRIPTION_STRAND'
-                    : strand in ['forward','fr','fr-secondstrand'] ? 'FIRST_READ_TRANSCRIPTION_STRAND'
+                    : strand in ['forward','yes','fr','fr-secondstrand'] ? 'FIRST_READ_TRANSCRIPTION_STRAND'
                     : 'NONE'
     def strand_arg = (strand == 'auto' && gene_counts) ? "auto --gene-counts ${gene_counts}" : strand_spec
     // Paired-end: keep properly paired reads (Picard stops on interchromosomal discordant
@@ -277,7 +278,7 @@ process ARRIBA {
     def pd_flag  = arriba_protein_domains ? "-p ${arriba_protein_domains}"  : ''
     // Arriba's -s accepts ONLY: auto | yes | no | reverse. Translate common
     // library-prep terms; default to 'auto' (robust) for anything unrecognised.
-    def strand   = (params.rna_strandedness ?: 'auto').toString().toLowerCase()
+    def strand   = rnaStrandedness()
     def strand_map = [ 'auto':'auto', 'unstranded':'no', 'no':'no',
                        'forward':'yes', 'yes':'yes', 'fr':'yes', 'fr-secondstrand':'yes',
                        'reverse':'reverse', 'rf':'reverse', 'fr-firststrand':'reverse' ]

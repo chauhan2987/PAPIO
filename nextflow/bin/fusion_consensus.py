@@ -108,24 +108,36 @@ def bp_strand(s):
     parts = str(s or "").split(':')
     return parts[2] if len(parts) >= 3 and parts[2] in ("+", "-") else ""
 
+CONF_RANK = {"high": 3, "medium": 2, "low": 1}
+
 def add(store, p5, p3, bp5, bp3, caller, support, extra, strands=("", "")):
     key, g5, g3 = canon_key(p5, p3), p5[1], p3[1]
     d = store.setdefault(key, {
         "genes": (g5, g3), "ctat": (p5[2], p3[2]), "bp5": bp5, "bp3": bp3,
         "callers": set(), "support": 0, "arriba_conf": "", "type": "", "known": False,
-        "alias5": set(), "alias3": set(), "strands": ("", "")
+        "alias5": set(), "alias3": set(), "strands": ("", ""), "arriba_best": None
     })
     d["callers"].add(caller)
     d["alias5"] |= p5[3]; d["alias3"] |= p3[3]
-    try: d["support"] += int(float(support))
-    except Exception: pass
-    # keep first non-empty breakpoints / directional gene order (prefer Arriba, then STAR-Fusion)
-    if caller == "arriba" or (not d["bp5"] and bp5):
+    try: sup = int(float(support))
+    except Exception: sup = 0
+    d["support"] += sup
+    # Breakpoints and directional gene order: Arriba's best row for the pair (highest confidence,
+    # then most reads; Arriba lists a pair once per breakpoint, in no confidence order), else the
+    # first caller that gave breakpoints. The pair's Arriba confidence is that of its best row.
+    if caller == "arriba":
+        rank = (CONF_RANK.get((extra.get("arriba_conf") or "").lower(), 0), sup)
+        if d["arriba_best"] is None or rank > d["arriba_best"]:
+            d["arriba_best"] = rank
+            d["genes"] = (g5, g3); d["ctat"] = (p5[2], p3[2])
+            d["bp5"] = bp5 or d["bp5"]; d["bp3"] = bp3 or d["bp3"]
+            if extra.get("arriba_conf"): d["arriba_conf"] = extra["arriba_conf"]
+            if extra.get("type"):        d["type"] = extra["type"]
+            if all(strands):             d["strands"] = strands
+    elif d["arriba_best"] is None and not d["bp5"] and bp5:
         d["genes"] = (g5, g3); d["ctat"] = (p5[2], p3[2])
-        d["bp5"] = bp5 or d["bp5"]; d["bp3"] = bp3 or d["bp3"]
+        d["bp5"] = bp5; d["bp3"] = bp3 or d["bp3"]
     if all(strands) and not all(d["strands"]): d["strands"] = strands
-    if extra.get("arriba_conf"): d["arriba_conf"] = extra["arriba_conf"]
-    if extra.get("type"):        d["type"] = extra["type"]
 
 store = {}
 

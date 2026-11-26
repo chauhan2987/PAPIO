@@ -1740,7 +1740,7 @@ process VCF2MAF {
 
 
     PY=\$(command -v python3 || echo /opt/conda/bin/python3)
-    "\$PY" "\$(command -v trim_maf.py)" ${meta.sample_id}.maf ${is_germline ? 'germline' : 'somatic'}
+    "\$PY" "\$(command -v trim_maf.py)" ${meta.sample_id}.maf ${is_germline ? 'germline' : 'somatic'} ${meta.patient_id ?: meta.sample_id}
     """
 }
 

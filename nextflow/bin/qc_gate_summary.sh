@@ -19,13 +19,16 @@ sample_row() {
         $1 == "sample_id" { sid = $2; next }
         { val[$1] = $2; flg[$1] = $4 }
         END {
-            n = split(metrics, m, " "); overall = "PASS"; line = sid
+            ## WARN if any metric warns; else UNKNOWN if a metric every sample has (coverage,
+            ## mapping rate) could not be read; contamination is UNKNOWN by design for tumours
+            n = split(metrics, m, " "); warn = 0; unk = 0; line = sid
             for (i = 1; i <= n; i++) {
                 v = (m[i] in val && val[m[i]] != "") ? val[m[i]] : "NA"
-                if (flg[m[i]] == "WARN") overall = "WARN"
+                if (flg[m[i]] == "WARN") warn = 1
+                if (flg[m[i]] == "UNKNOWN" && m[i] != "contamination_freemix") unk = 1
                 line = line "\t" v
             }
-            print line "\t" overall
+            print line "\t" (warn ? "WARN" : unk ? "UNKNOWN" : "PASS")
         }' "$1"
 }
 

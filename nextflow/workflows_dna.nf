@@ -293,7 +293,6 @@ workflow GERMLINE_BLOCK {
     //ch_interval_list
     ch_call_regions_gz       // value: bgzipped+tabixed BED tuple, or []
     ch_call_regions_tbi
-    ch_scatter_intervals
     ch_hapmap
     ch_hapmap_tbi
     ch_omni
@@ -309,7 +308,6 @@ workflow GERMLINE_BLOCK {
     ch_germ_scatter
     ch_roh_af_file
     ch_roh_af_file_tbi
-    ch_annotsv_dir
 
     main:
     ch_snv_vcf = channel.empty()
@@ -1389,10 +1387,13 @@ workflow DNA_WORKFLOW {
         }
     }
     else if (params.start_at == 'annotation') {
+        // <sample>.vcf.gz, or the final call set as this pipeline publishes it in
+        // 05_variant_calling (<sample>_filtered.vcf.gz; germline_filter none: _genotyped)
         ch_active_vcf = ch_vcf_samples.map { meta ->
-            tuple(meta,
-                file("${params.input_vcf_dir}/${meta.sample_id}.vcf.gz",     checkIfExists: true),
-                file("${params.input_vcf_dir}/${meta.sample_id}.vcf.gz.tbi", checkIfExists: true))
+            def names = ["${meta.sample_id}.vcf.gz", "${meta.sample_id}_filtered.vcf.gz", "${meta.sample_id}_genotyped.vcf.gz"]
+            def hit   = names.collect { n -> file("${params.input_vcf_dir}/${n}") }.find { f -> f.exists() }
+            if (!hit) error "start_at='annotation': none of ${names.join(', ')} in ${params.input_vcf_dir}"
+            tuple(meta, hit, file("${hit}.tbi", checkIfExists: true))
         }
     }
     else if (params.start_at == 'classification') {
@@ -1543,7 +1544,6 @@ workflow DNA_WORKFLOW {
                 ch_interval_bed,
                 //ch_interval_list,
                 ch_call_regions_gz, ch_call_regions_tbi,
-                ch_scatter_intervals,
                 ch_hapmap, ch_hapmap_tbi,
                 ch_omni, ch_omni_tbi,
                 ch_thousandg_snps, ch_thousandg_tbi,
@@ -1554,8 +1554,7 @@ workflow DNA_WORKFLOW {
                 ch_gcnv_annotated_intervals,
                 ch_germ_scatter,
                 ch_roh_af_file,
-                ch_roh_af_file_tbi,
-                ch_annotsv_dir
+                ch_roh_af_file_tbi
             )
         }
 

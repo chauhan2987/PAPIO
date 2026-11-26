@@ -3,32 +3,37 @@
 # Author : Pankaj Chauhan
 # Purpose: Trim vcf2maf output to the PAPIO MAF columns and add VAFs.
 #          Called by the PAPIO process VCF2MAF; moved from an inline heredoc.
-# Usage  : trim_maf.py <out.maf> <germline|somatic>   (reads full.maf)
+# Usage  : trim_maf.py <out.maf> <germline|somatic> <patient_id>   (reads full.maf)
+#          Tumor_Sample_Barcode / Matched_Norm_Sample_Barcode = sample IDs (germline: the sample in
+#          both); Patient_ID groups the samples of one patient (several tumours, DNA and RNA).
 #------------------------------------------------------------------------------
 import csv, sys
-if len(sys.argv) != 3 or sys.argv[2] not in ("germline", "somatic"):
-    sys.exit("usage: trim_maf.py <out.maf> <germline|somatic>")
+if len(sys.argv) != 4 or sys.argv[2] not in ("germline", "somatic"):
+    sys.exit("usage: trim_maf.py <out.maf> <germline|somatic> <patient_id>")
 germline = sys.argv[2] == "germline"
+patient  = sys.argv[3]
 if germline:
     want = ["Hugo_Symbol","Entrez_Gene_Id","Gene","dbSNP_RS","NCBI_Build","Chromosome",
             "Start_Position","End_Position","Strand","Variant_Classification","Variant_Type",
             "Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2",
+            "Tumor_Sample_Barcode","Matched_Norm_Sample_Barcode","Patient_ID",
             "Match_Norm_Seq_Allele1","Match_Norm_Seq_Allele2","HGVSc","HGVSp","HGVSp_Short",
             "Transcript_ID","Exon_Number","t_GT","n_GT","n_depth","n_ref_count","n_alt_count",
             "Allele","Protein_position","Amino_acids","Codons","EXON","INTRON","Normal_VAF",
             "all_effects","Feature","FILTER","CLIN_SIG","ClinVar_CLNSIG","ClinVar_CLNREVSTAT","MAX_AF",
             "gnomAD_fafmax_faf95_max_j"]
-    computed = {"Normal_VAF"}
+    computed = {"Normal_VAF", "Patient_ID"}
 else:
     want = ["Hugo_Symbol","Gene","dbSNP_RS","NCBI_Build","Chromosome",
             "Start_Position","End_Position","Strand","Variant_Classification",
             "Variant_Type","Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2",
+            "Tumor_Sample_Barcode","Matched_Norm_Sample_Barcode","Patient_ID",
             "HGVSc","HGVSp","HGVSp_Short","Transcript_ID","Exon_Number",
             "t_GT","n_GT","t_depth","t_ref_count","t_alt_count",
             "n_depth","n_ref_count","n_alt_count","Allele","Protein_position",
             "Amino_acids","Codons","EXON","INTRON","Tumor_VAF","Normal_VAF",
             "all_effects","Feature","FILTER"]
-    computed = {"Tumor_VAF", "Normal_VAF"}
+    computed = {"Tumor_VAF", "Normal_VAF", "Patient_ID"}
 
 with open("full.maf") as f:
     lines = f.readlines()
@@ -58,4 +63,5 @@ with open(sys.argv[1], "w", newline="") as out:
         if not germline:
             r["Tumor_VAF"] = vaf(row.get("t_alt_count"), row.get("t_ref_count"))
         r["Normal_VAF"] = vaf(row.get("n_alt_count"), row.get("n_ref_count"))
+        r["Patient_ID"] = patient
         w.writerow(r)

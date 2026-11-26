@@ -77,7 +77,7 @@ genomics_pipeline/
 |   |-- params/               # ready-made params files: somatic, somatic_sensitive, germline, rna_fusion
 |   |-- scripts/              # run by the user, not the pipeline: check_installation.sh, download_demo_fastq.sh,
 |   |                         #   compare_to_expected.sh, make_reference_manifest.sh, make_demo_subset.sh,
-|   |                         #   make_test_bundle.sh, prepare_gnomad_faf.sh
+|   |                         #   make_test_bundle.sh, prepare_gnomad_faf.sh, gtf_to_transcripts.sh
 |   |-- docs/                 # RESOURCES.md (resources and compute), DEMO.md (test run and full benchmark)
 |   |-- tests/expected/       # expected outputs of the test run
 |   |                         # optional PoN builder: main_pon.nf + components_pon.nf + pon.config (Appendix A, step 4.5)
@@ -199,7 +199,7 @@ its own `lane_num`/`chunk`, otherwise the run stops with an error.
 |---|---|
 | `patient_id` | Patient identifier; links tumor, normal and RNA of one patient |
 | `sample` | Optional. Label for several samples of one patient and type (multi-region or longitudinal tumors, e.g. `T1`, `T2`, `relapse`); letters, digits and `-` only. Leave blank (or omit the column) for one sample per type |
-| `sex` | `0` female, `1` male, `NA` unknown (NA switches off the sex check; Sequenza then takes the sex from the normal's chrX depth) |
+| `sex` | `0` (or `F`, `female`) female, `1` (or `M`, `male`) male, `NA` unknown (NA switches off the sex check; Sequenza then takes the sex from the normal's chrX depth) |
 | `tumor_type` | Free-text label, e.g. `BRCA`, `RCC`; `NA` for normal-only samples |
 | `batch` | Library or batch identifier (`LB` in the read group) |
 | `sample_type` | DNA sheet: `DT` tumor, `DN` normal. RNA sheet: `RN` or `RT` (both get the suffix `_R`, so give two RNA samples of one patient distinct `sample` labels) |
@@ -259,14 +259,14 @@ preflight_references:   true            # check references before any job is sub
 # ---------------- Input / output ----------------
 pipeline_root:          ${projectDir}                  # the nextflow/ folder (holds main.nf)
 container_dir:          ${projectDir}/../containers
-fastq_root:             /scratch/<user>/fastq
-work_root:              /scratch/<user>/work_demo
-outdir:                 /home/<user>/Result_demo
-dna_samplesheet:        /home/<user>/samples_dna_demo.csv
-rna_samplesheet:        /home/<user>/samples_rna_demo.csv
+fastq_root:             ${projectDir}/../demo/fastq
+work_root:              ${projectDir}/../runs/somatic_demo
+outdir:                 ${projectDir}/../runs/somatic_demo/Result
+dna_samplesheet:        ${projectDir}/../demo/samplesheets/dna_somatic.csv
+rna_samplesheet:        null
 
-# directories the containers may read/write
-bind_paths:             [/home/<user>, /scratch/<user>]
+# directories the containers may read/write (add the folders of your own FASTQs and runs)
+bind_paths:             ['${projectDir}/../references', '${projectDir}/../runs', '${projectDir}/../demo']
 
 # ---------------- Reference genome ----------------
 # (GDC GRCh38.d1.vd1)
@@ -369,7 +369,7 @@ star_index:             ${projectDir}/../references/star/StarIndex_gencode_v49
 salmon_transcripts:     ${projectDir}/../references/star/gencode.v49.annotation.transcripts.fa   # Salmon (Appendix A, step 8.7)
 refflat:                ${projectDir}/../references/rna_qc/gencode.v49.refFlat
 rrna_interval_list:     ${projectDir}/../references/rna_qc/gencode.v49.rrna.interval_list
-rna_strandedness:       auto
+rna_strandedness:       auto              # auto (from STAR gene counts) | no | yes (forward) | reverse (dUTP, most kits)
 ctat_lib:               ${projectDir}/../references/ctat/GRCh38_gencode_v44_CTAT_lib_Oct292023.plug-n-play/ctat_genome_lib_build_dir   # needed only for STAR-Fusion, FusionInspector, rna_use_ctat_reference, or when star_index is not given
 arriba_blacklist:       ${projectDir}/../references/arriba/blacklist_hg38_GRCh38_v2.5.1.tsv.gz
 arriba_known_fusions:   ${projectDir}/../references/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz
@@ -424,7 +424,8 @@ nextflow run ${HOME}/genomics_pipeline/nextflow/main.nf -c ${HOME}/genomics_pipe
 ```
 
 - Profiles: `production` (LSF, default settings), `clinical` (BQSR on, DeepVariant), `local` (one server),
-  `slurm` (SLURM cluster). Profiles can be combined, e.g. `-profile production,slurm`.
+  `slurm` (SLURM cluster), `bignode` (raises the memory ceiling for very deep samples; with `production`) and `test`
+  (CI only: local, mapping to markdup). Profiles can be combined, e.g. `-profile production,slurm`.
 - Before the first run, `bash nextflow/scripts/check_installation.sh params_demo.yaml` lists anything missing.
   The pipeline itself also stops at start when a required resource is missing (e.g. `dbsnp`, `hapmap`, `omni`,
   `thousandg_snps` and `mills` for HaplotypeCaller; `dbsnp` for MuSE).
@@ -433,8 +434,10 @@ nextflow run ${HOME}/genomics_pipeline/nextflow/main.nf -c ${HOME}/genomics_pipe
   parameters differ from the run it resumes and lists them. Use a new `work_root` (or drop `-resume`) after changing
   parameters; `allow_param_change_on_resume: true` downgrades the stop to a warning.
 - **Partial runs:** set `stop_at` (e.g. `variant_calling`). To restart later from published files, set `start_at`
-  and the matching input folder (`input_bam_dir` from `markdup` on, `input_vcf_dir` for `annotation`,
-  `input_annot_dir` for `classification`). The consolidated reports need upstream results of the same run,
+  and the matching input folder (`input_bam_dir` from `markdup` on; `input_vcf_dir` for `annotation`, the folder
+  holding `<S>_filtered.vcf.gz`, `<S>_genotyped.vcf.gz` or `<S>.vcf.gz`; `input_annot_dir` for `classification`, the
+  folder holding `<S>_vep.vcf.gz`). BAMs that are already deduplicated (or UMI consensus) elsewhere enter with
+  `dedup_mode: external` and `start_at: metrics` or later. The consolidated reports need upstream results of the same run,
   so they are not made when starting at `classification`; use `-resume` instead.
 - **Process-specific resources:** put overrides in a small extra config and add it with a second `-c`:
 
@@ -446,7 +449,8 @@ process {
 }
 ```
 
-A run writes `pipeline_trace.txt`, `report.html` and `timeline.html` to `outdir`.
+A run writes `pipeline_trace.txt` and `pipeline_report.html` to `outdir`; `detailed_reports: true` adds
+`pipeline_timeline.html` and `pipeline_dag.html`.
 
 ---
 
@@ -505,7 +509,7 @@ the cut-offs is REVIEW.
 | | `CNVKIT` → `CNVKIT_CALL` | required; integer copy number uses the Sequenza purity (`-m clonal`) when Sequenza ran |
 | | `MSISENSOR_PRO` → `CLASSIFY_MSI`; `MSISENSOR_GENE_MAP` | resource (`msisensor_list`); status = toggle (`classify_msi`, on); gene map needs `gene_bed` |
 | 6 annotation | `ANNOTATE_VCF` (VEP; ClinVar, COSMIC and gnomAD FAF when given); `MULTIQC_ANNOT` | required |
-| | `COMPUTE_TMB` | toggle (`compute_tmb`, on; WES needs `tmb_coding_bed`; reported as NA on WGS) |
+| | `COMPUTE_TMB` | toggle (`compute_tmb`, on; on WES the capture BED is intersected with `tmb_coding_bed` when set; reported as NA on WGS) |
 | 7 classification | `CLASSIFY_VARIANTS` (somatic mode) | toggle (`classify_variants`, on) |
 | | `VCF2MAF` | toggle (`generate_maf`, on) |
 | | `ANNOTATE_SV_SOMATIC` | resource (`annotsv_dir`) |
@@ -537,12 +541,13 @@ annotates their calls (VEP; ClinVar and gnomAD FAF when given, no COSMIC).
 
 | Stage | Processes | Kind |
 |---|---|---|
+| 0 | `MANIFEST_ROW` → `WRITE_MANIFEST` | toggle (`write_manifest`, off) |
 | 1 mapping | `STAR_ALIGN` (two-pass unless `star_twopass: false`, chimeric output) | required |
 | | `SALMON_QUANT` (on STAR's transcriptome alignments) | resource (`salmon_transcripts`) |
 | | `CRAM_CONVERT` | toggle (`rna_cram_convert`, off) |
 | 3 metrics | `RNASEQ_METRICS` (Picard CollectRnaSeqMetrics; strandedness inferred from the STAR gene counts when `rna_strandedness: auto`); `SAMTOOLS_STATS`; `MULTIQC` | required |
 | 5 variant calling | `ARRIBA` | toggle (`use_arriba`, on) |
-| | `STARFUSION` (kickstart from the STAR chimeric junctions) | toggle (`use_starfusion`, on) |
+| | `STARFUSION` (its own STAR run on the CTAT library; with `rna_shared_star: true`, kickstart from `STAR_ALIGN`'s chimeric junctions) | toggle (`use_starfusion`, on) |
 | | `FUSIONCATCHER` | toggle (`use_fusioncatcher`, off; needs `fusioncatcher_db`) |
 | | `FUSION_CONSENSUS` | required |
 | | `FILTER_FUSION_CANDIDATES` → `FUSIONINSPECTOR` | toggle (`use_fusioninspector`, on) |
@@ -550,6 +555,12 @@ annotates their calls (VEP; ClinVar and gnomAD FAF when given, no COSMIC).
 | | `EVIDENCE_BAM` | resource (`evidence_bed`) |
 | 6 annotation | `ANNOTATE_FUSIONS` (known fusions + COSMIC CGC → tiers) | required |
 | 7 classification | `CONSOLIDATE_FUSION_REPORT` | required |
+
+### Panel-of-normals builder (`main_pon.nf`, optional)
+
+`PON_MUTECT2` (per normal and shard) → `PON_MERGE_NORMAL` → `PON_GENOMICSDB_IMPORT` (per shard) → `PON_CREATE_SHARD`
+→ `PON_MERGE_FINAL`. A separate workflow, run once per capture kit (Appendix A, step 4.5); its panel is then given to
+the somatic arm as `panel_of_normals`.
 
 ### Which process assigns which label
 
@@ -594,10 +605,11 @@ counts as a vote for it only when it reports every base change of that variant. 
 the supporting callers in both modes. `FILTER_SOMATIC_VCF` then applies the tumor VAF, alt-read, depth and matched-normal
 limits (`filter_*` parameters) and, with `somatic_filter_mode: tag` (default), labels failures instead of dropping them.
 VAF is alt / (ref + alt) from FORMAT/AD for every caller (Mutect2's FORMAT/AF is a model estimate). The MAF columns
-`Tumor_VAF` and `Normal_VAF` use the same definition.
+`Tumor_VAF` and `Normal_VAF` use the same definition. `Tumor_Sample_Barcode` is the tumor sample ID (germline MAF: the
+sample itself), `Matched_Norm_Sample_Barcode` the normal, and `Patient_ID` groups several tumors of one patient.
 
 **TMB.** Nonsynonymous coding PASS variants per megabase of the territory: the capture BED, intersected with
-`tmb_coding_bed` and with the bases at depth ≥ `filter_min_tumor_dp` (20) in the tumor and ≥ `tmb_min_normal_dp` (10)
+`tmb_coding_bed` (when set) and with the bases at depth ≥ `filter_min_tumor_dp` (20) in the tumor and ≥ `tmb_min_normal_dp` (10)
 in the normal (mosdepth depth classes from the metrics stage of the same run; thresholds round up to the next class
 boundary 1, 10, 20, 30, 50, 100). The `territory` row records what was used, with the BED size before the depth step;
 re-entry runs without the metrics stage use the BED territory. A sample with no base at those depths gets TMB NA.
@@ -657,8 +669,8 @@ is shown in its own column but is not used as evidence of oncogenicity, because 
 assertions; a ClinVar Benign or Likely benign call does mark a somatic variant LIKELY_BENIGN. ClinVar's separate
 oncogenicity classification (somatic, ClinVar releases from 2024; INFO `ONC`/`ONCREVSTAT`) sets a lower bound when it
 has at least `clinvar_min_stars` review stars: Oncogenic gives ONCOGENIC_STRONG, Likely oncogenic at least
-ONCOGENIC_MODERATE, and Benign or Likely benign gives LIKELY_BENIGN. The value and its stars are in the last two columns
-of the pre-classification table (`CLINVAR_ONC`, `CLINVAR_ONC_STARS`). In germline mode, a null variant is flagged
+ONCOGENIC_MODERATE, and Benign or Likely benign gives LIKELY_BENIGN. The value and its stars are in the `CLINVAR_ONC` and
+`CLINVAR_ONC_STARS` columns of the pre-classification table, just before `VAF` and `ORIGIN`. In germline mode, a null variant is flagged
 LOF_CANCER_GENE_REVIEW only in tumor suppressors marked as germline genes in the CGC (all CGC tumor suppressors if the
 file has no `Germline` column), since loss of function is the predisposition mechanism there. Multi-allelic sites are
 split before annotation so each alternate allele is classified on its own.
@@ -673,7 +685,7 @@ optional steps appear only when the step runs.
 
 ```
 <outdir>/
-|-- 00_manifest/<analysis>/            preflight_references.txt, run_manifest.tsv (write_manifest)
+|-- 00_manifest/<analysis>/            preflight_references.txt (DNA arms), run_manifest.tsv (write_manifest)
 |-- 01_mapping/rna_fusion/
 |   |-- star/                          <S>.Log.final.out, .SJ.out.tab, .ReadsPerGene.out.tab, .Chimeric.out.junction
 |   |-- salmon/                        <S>/quant.sf, Salmon logs and library type (salmon_transcripts)
@@ -681,14 +693,15 @@ optional steps appear only when the step runs.
 |                                      <S>_family_sizes.txt (umi_consensus)
 |-- 03_metrics/
 |   |-- mosdepth/                      <S>.mosdepth.summary.txt, .global.dist.txt, .region.dist.txt, .regions.bed.gz,
-|   |                                  .thresholds.bed.gz, .gene_coverage.tsv (coverage_report_bed)
+|   |                                  .thresholds.bed.gz, .quantized.bed.gz (TMB depth classes),
+|   |                                  .gene_coverage.tsv (coverage_report_bed)
 |   |-- picard/                        <S>.hs_metrics, .alignment_summary_metrics, .insert_size_metrics, .gc_bias.summary_metrics,
 |   |                                  .bait_bias_summary_metrics, .pre_adapter_summary_metrics
 |   |-- samtools/                      <S>.stats
 |   |-- sex/                           <S>_sex.tsv
 |   |-- verifybamid/                   <normal>.selfSM (verifybamid_db)
 |   |-- somalier/                      somalier.pairs.tsv, somalier.samples.tsv, somalier.html, sample_swap_report.tsv,
-|   |                                  ancestry results (somalier_ancestry_labels)
+|   |                                  somalier-ancestry.somalier-ancestry.tsv/.html (somalier_ancestry_labels)
 |   |-- gate/                          <S>_qc_gate.tsv, cohort_qc_summary.tsv
 |   |-- rna_fusion/rnaseq_qc/          <S>.rna_metrics, <S>.strandedness.txt
 |-- 04_bqsr/bqsr_bams/                 <S>_bqsr.bam, .bai (bqsr)
@@ -702,37 +715,42 @@ optional steps appear only when the step runs.
 |   |   |                              <S>_filter_stats.txt
 |   |   |-- sv/manta/                  <S>_manta_somaticSV.vcf.gz, <S>_manta_candidateSmallIndels.vcf.gz
 |   |   |-- cnv/cnvkit/                <S>.cnr, <S>.cns, <S>-call.cns
-|   |   |-- cnv/sequenza/              <S>_segments.txt, _confints_CP.txt, _alternative_solutions.txt, _fit_qc.tsv,
-|   |   |                              _gene_loh.tsv, _arm_cn.tsv, _cn_summary.tsv, plots (PDF), R objects
+|   |   |-- cnv/sequenza/              <S>_segments.txt, _mutations.txt, _confints_CP.txt, _alternative_solutions.txt,
+|   |   |                              _fit_qc.tsv, _gene_loh.tsv, _arm_cn.tsv, _cn_summary.tsv, _sequenza_log.txt
+|   |   |                              (includes the sex model used), plots (PDF), R objects
 |   |   |-- msi/                       <S>_msi, _msi_all, _msi_dis, _msi_unstable, <S>_msi_status.txt, <S>_msi_genes.tsv
 |   |   |-- contamination/             <S>.contamination.table, <S>.segments.table (pileup_variants)
 |   |   |-- signatures/                <S>_signatures/ (mutational_signatures)
-|   |   |-- evidence_bam/              read slices (evidence_bed)
+|   |   |-- evidence_bam/              <S>.evidence.bam, .bai (evidence_bed)
 |   |-- germline/
 |   |   |-- gvcf/                      <S>.g.vcf.gz (HaplotypeCaller)
 |   |   |-- snv/                       <S>_filtered.vcf.gz (nv, vqsr) or <S>_genotyped.vcf.gz (none);
-|   |   |                              snv/deepvariant/ with germline_caller: deepvariant
-|   |   |-- joint/                     cohort VCF (vqsr)
+|   |   |                              snv/deepvariant/<S>.vcf.gz, <S>.g.vcf.gz with germline_caller: deepvariant
+|   |   |-- joint/                     cohort_joint.vcf.gz (vqsr)
 |   |   |-- sv/manta/                  <S>_manta_diploidSV.vcf.gz, <S>_manta_candidateSV.vcf.gz
-|   |   |-- cnv/gcnv/                  gCNV segments (run_gcnv)
-|   |   |-- roh/                       runs of homozygosity (run_roh, WGS)
-|   |   |-- hla/                       OptiType HLA class I types (run_optitype)
-|   |   |-- evidence_bam/              read slices (evidence_bed)
+|   |   |-- cnv/gcnv/                  <S>_gcnv_segments.vcf.gz, _gcnv_intervals.vcf.gz, _gcnv_denoised_cr.tsv (run_gcnv)
+|   |   |-- roh/                       <S>_roh.txt (run_roh, WGS)
+|   |   |-- hla/                       <S>_result.tsv, OptiType HLA class I types (run_optitype)
+|   |   |-- evidence_bam/              <S>.evidence.bam, .bai (evidence_bed)
 |   |-- rna_fusion/
 |       |-- arriba/                    <S>_arriba_fusions.tsv, <S>_arriba_fusions.discarded.tsv
-|       |-- starfusion/, fusioncatcher/, fusioninspector/   per-caller and validation outputs
+|       |-- starfusion/                <S>_starfusion.tsv
+|       |-- fusioncatcher/             <S>_fusioncatcher.txt (use_fusioncatcher)
+|       |-- fusioninspector/           <S>_fusioninspector.tsv (use_fusioninspector)
 |       |-- consensus/                 <S>_fusion_consensus.tsv, <S>_fusion_consensus_stats.txt, <S>_fusion_candidates.txt,
 |       |                              <S>_fusion_names.tsv (CTAT name -> reported name)
-|       |-- trust4/, telescope/, evidence_bam/              optional RNA outputs
+|       |-- trust4/                    <S>_report.tsv, <S>_airr.tsv (trust4_ref_dir)
+|       |-- telescope/                 <S>-telescope_report.tsv (telescope_gtf)
+|       |-- evidence_bam/              <S>.evidence.bam, .bai (evidence_bed)
 |-- 06_annotation/<analysis>/          <S>_vep.vcf.gz, <S>_vep_summary.html; tmb/<S>_tmb.txt (somatic);
-|                                      sv/ AnnotSV tables (annotsv_dir); <S>_fusions_annotated.tsv (rna_fusion)
+|                                      sv/<S>_<source>_annotsv.tsv (annotsv_dir); <S>_fusions_annotated.tsv (rna_fusion)
 |-- 07_classification/<analysis>/      <S>_preclassification.tsv; maf/<S>.maf;
-|                                      reports/<S>_consolidated.tsv (somatic), <S>_germline_consolidated.tsv (germline),
-|                                      <S>_fusion_report.tsv (rna_fusion)
+|                                      reports/<patient_id>_consolidated.tsv (somatic; a labelled tumor: <S>_consolidated.tsv),
+|                                      <S>_germline_consolidated.tsv (germline), <patient_id>_fusion_report.tsv (rna_fusion)
 |-- 0x_multiqc/<analysis>/             MultiQC reports per stage (01_trimming, 02_markdup, 03_metrics, 03_somalier,
 |                                      06_annotation; one report for rna_fusion)
 |-- 0x_crams/                          dedup/, bqsr/ (make_cram), rna/ (rna_cram_convert)
-|-- pipeline_trace.txt, pipeline_report.html (pipeline_timeline.html with detailed_reports)
+|-- pipeline_trace.txt, pipeline_report.html (pipeline_timeline.html, pipeline_dag.html with detailed_reports)
 ```
 
 The deduplicated BAMs are kept in the work directory and are not copied to `outdir`; set `make_cram: true` to archive
@@ -1014,8 +1032,6 @@ $GATK gatk ValidateVariants -V $F -R $REF --validation-type-to-exclude ALL
 
 ---
 
----
-
 ### 4. Capture intervals
 
 Design BEDs come from Agilent SureDesign (login required): https://earray.chem.agilent.com/suredesign/. Put the two
@@ -1085,7 +1101,7 @@ grep -hv '^@' $K/${ID}_scatter_24_pad100/*.interval_list \
 $BCF bash -c "bgzip -f $K/${ID}_targets_pad100.bed && tabix -f -p bed $K/${ID}_targets_pad100.bed.gz"
 ```
 
-Params YAML entries (the same names for every kit, under its own folder):
+Params YAML entries (each kit's files carry its ID and sit in its own folder):
 
 | Parameter | File under `references/capture/<KIT>/` |
 |---|---|
@@ -1117,7 +1133,7 @@ S002_N,/path/S002_N.bam,/path/S002_N.bam.bai
 
 ```yaml
 pon_samplesheet:    /home/<user>/normals_pon.csv
-container_dir:      /home/<user>/genomics_pipeline/containers
+container_dir:      ${projectDir}/../containers
 work_root:          /scratch/<user>/work_pon
 outdir:             /home/<user>/Result_pon
 bind_paths:         [/home/<user>, /scratch/<user>]
@@ -1354,7 +1370,7 @@ cd $P
 ```
 
 Variants outside MANE transcript regions get no gnomAD frequency from this file. To cover every PASS site instead,
-build the file from the official per-chromosome gnomAD files with `scripts/prepare_gnomad_faf.sh <out_dir> [threads]`
+build the file from the official per-chromosome gnomAD files with `nextflow/scripts/prepare_gnomad_faf.sh <out_dir> [threads]`
 (about 900 GB downloaded one chromosome at a time; output `gnomad.joint.v4.1.faf95.vcf.gz`, with the field renamed
 `fafmax_faf95_max_j`).
 
@@ -1520,13 +1536,13 @@ and `fusion_truth_match.py` (step 13); commands in step 14. Table 2 is `somatic_
 #### 9.0 Shell variables (set once)
 ```bash
 PIPE=${HOME}/genomics_pipeline
-DATA=${HOME}/test_data
+DATA=$PIPE/runs                          # outdirs of the demonstration runs (nextflow/params/*.yaml)
 R=$PIPE/references
 E=$PIPE/containers
 T=$R/truth
 REF=$R/genome/GRCh38.d1.vd1.fa
 SDF=$T/GRCh38_sdf
-SX="singularity exec -B $PIPE -B $DATA"
+SX="singularity exec -B $PIPE"
 BCF="$SX $E/bwa_samtools_fastp_fgbio_bcftools.sif bcftools"
 RTG="$SX $E/rtg_tools.sif rtg"
 BEDTOOLS="$SX $E/gatk.sif bedtools"
@@ -1566,8 +1582,8 @@ wget -c -P $R/truth $GB/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz $GB/HG002_GRCh
 ### 10. Benchmark settings and scoring helper
 
 ```bash
-OUT_S=$DATA/Result_valid_17_Oct_26_som      # set: outdir of the SEQC2 somatic run
-OUT_G=$DATA/Result_valid_17_Oct_26_germ     # set: outdir of the HG002 germline run
+OUT_S=$DATA/somatic_demo/Result     # outdir of the SEQC2 somatic run
+OUT_G=$DATA/germline_demo/Result    # outdir of the HG002 germline run
 
 HEADER="callset\ttype\ttruth\tTP\tFP\tFN\trecall\tprecision\tF1"
 ```
@@ -1683,7 +1699,7 @@ VARSCAN_INDEL=$OUT_S/05_variant_calling/somatic/snv/varscan/valid1_T_varscan_ind
 ```bash
 score_somatic final_pass     $FILT -f PASS     # consensus + VAF/alt reads/depth/normal filters
 score_somatic consensus_pass $CONS -f PASS     # ≥ 2 callers
-score_somatic consensus_all  $CONS             # all consensus records: Mutect2 PASS (incl. LOWCONSENSUS) + rescued union sites
+score_somatic consensus_all  $CONS             # all consensus records, LOWCONSENSUS included (plus non-Mutect2 sites with consensus_backbone: union)
 ```
 
 #### 11.6 Each caller before (raw) and after (pass) its own filter (Figure 3 and Table 2)
@@ -1752,7 +1768,7 @@ column -t germline_metrics.tsv
 ### 13. RNA fusion benchmark: HCC1395 RNA-seq vs the Talsania et al. 2022 fusion list
 
 ```bash
-OUT_R=$DATA/Result_valid_17_Oct_26_rna      # set: outdir of the RNA fusion run
+OUT_R=$DATA/rna_demo/Result         # outdir of the RNA fusion run
 SCRIPT=$PIPE/fusion_truth_match.py          # set: location of the script
 TRUTH=$T/Talsania_2022_Add_File9.csv        # set: Talsania Additional file 9, saved as CSV
 mkdir -p $OUT_R/benchmark && cd $OUT_R/benchmark

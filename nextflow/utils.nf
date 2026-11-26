@@ -25,6 +25,13 @@ def validStages()     { ['mapping', 'markdup', 'metrics', 'bqsr', 'variant_calli
 def validAssays()     { ['wes', 'wgs', 'rna'] }
 def validAnalyses()   { ['germline', 'somatic', 'tumor_only', 'rna_fusion'] }
 def validCallers()    { ['haplotypecaller', 'deepvariant'] }
+// rna_strandedness as a lower-case word. A params YAML reads an unquoted yes/no as a
+// boolean (YAML 1.1), so true/false are taken as Arriba's 'yes'/'no'.
+def rnaStrandedness() {
+    def v = params.rna_strandedness
+    if (v instanceof Boolean) return v ? 'yes' : 'no'
+    return (v == null || v.toString().trim() == '') ? 'auto' : v.toString().trim().toLowerCase()
+}
 def validDedupModes() { ['umi_consensus', 'umi_markdup', 'markdup', 'external'] }
 
 // Single stage-window predicate (ranks from the shared stageRankMap()), so
