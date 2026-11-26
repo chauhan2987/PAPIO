@@ -74,7 +74,7 @@ genomics_pipeline/
 |   |                         #   a usage header); processes keep only the tool call. Nextflow puts this folder on PATH
 |   |                         #   inside every task and container, and a change to a script re-runs its tasks on -resume
 |   |-- conf/                 # local.config (one server), slurm.config (SLURM)
-|   |-- params/               # ready-made params files: somatic, somatic_sensitive, germline, rna_fusion
+|   |-- params/               # ready-made params files: somatic, germline, rna_fusion
 |   |-- scripts/              # run by the user, not the pipeline: check_installation.sh, download_demo_fastq.sh,
 |   |                         #   compare_to_expected.sh, make_reference_manifest.sh, make_demo_subset.sh,
 |   |                         #   make_test_bundle.sh, prepare_gnomad_faf.sh, gtf_to_transcripts.sh
@@ -399,8 +399,7 @@ For the other arms, copy the file and change only:
 | RNA fusion | `assay: rna`, `analysis: rna_fusion`, `dna_samplesheet: null`, `rna_samplesheet:` the RNA sheet, new `work_root` and `outdir` |
 
 ---
-Ready-made params files for each arm, and a sensitive somatic preset (`params_somatic_sensitive.yaml`), are in
-`nextflow/params/`.
+Ready-made params files for each arm are in `nextflow/params/`.
 
 ### Checking a library for inline UMIs
 
@@ -505,7 +504,7 @@ the cut-offs is REVIEW.
 | | `STRELKA2` → `TAG_STRELKA_AF` | toggle (`use_strelka2`, on)¹ |
 | | `MUSE_CALL` → `MUSE_SUMP` → `TAG_MUSE_AF` | toggle (`use_muse`, on; needs `dbsnp`)¹ |
 | | `VARSCAN` (per shard on WGS) → `VARSCAN_MERGE` → `TAG_VARSCAN_AF` | toggle (`use_varscan`, on)¹ |
-| | `ENSEMBLE_CONSENSUS` | toggle (`somatic_consensus`, on); voting set by `consensus_backbone` (see "Somatic consensus options"); also formats a single non-Mutect2 `somatic_caller` |
+| | `ENSEMBLE_CONSENSUS` | toggle (`somatic_consensus`, on); voting set by `consensus_backbone` (see "Somatic SNV/indel calling"); also formats a single non-Mutect2 `somatic_caller` |
 | | `FILTER_SOMATIC_VCF` | toggle (`somatic_variant_filter`, on) |
 | | `MUTATIONAL_SIGNATURES` | toggle (`mutational_signatures`, off) |
 | | `SEQUENZA` → `SEQUENZA_GENE_LOH` | resource (`sequenza_gc_wiggle`; the gene and arm tables need `gene_bed` and `arm_bed`) |
@@ -587,38 +586,43 @@ the somatic arm as `panel_of_normals`.
 
 All labels are computational pre-classifications for review, not AMP/ASCO/CAP or ACMG/AMP clinical tiers.
 
-**Somatic consensus options.** Three ways to build the somatic SNV/indel call set:
+**Somatic SNV/indel calling.** Four callers are available: Mutect2, Strelka2, MuSE (SNVs only) and VarScan2. Pick
+one of these modes; the defaults give the first.
 
-- **Mutect2-anchored vote** (default; recommended for publication, fresh-frozen or FFPE): Mutect2 PASS calls kept
-  when ≥ N callers agree. Keeps Mutect2's contamination, orientation-bias (FFPE) and panel-of-normals filtering.
-- **True consensus** (`consensus_backbone: union`): N-of-M vote with Mutect2 as one vote (PCAWG / MC3 style); more
-  sensitive. With `use_mutect2: false` it runs without Mutect2 and so without those filters.
-- **One caller** (`somatic_consensus: false`): the calls of `somatic_caller` alone (default Mutect2, the GATK standard).
+| Mode | Set | Final calls | Use for |
+|---|---|---|---|
+| Mutect2-anchored vote (default) | nothing | Mutect2 PASS calls that ≥ 2 callers report (Mutect2 counts as one) | Publication; fresh-frozen or FFPE. Keeps Mutect2's contamination, FFPE orientation-bias and panel-of-normals filters |
+| True consensus | `consensus_backbone: union` | Any call that ≥ 2 callers report, Mutect2 as one vote. Includes calls Mutect2 missed or filtered | Higher sensitivity; the PCAWG / TCGA MC3 approach |
+| True consensus without Mutect2 | `consensus_backbone: union`, `use_mutect2: false`, at least two of `use_strelka2`, `use_muse`, `use_varscan` | Any call that ≥ 2 of those callers report | When Mutect2 cannot run. No contamination, FFPE or panel-of-normals filtering |
+| One caller | `somatic_consensus: false`, `somatic_caller: <caller>` | That caller's calls; no vote | Least compute. `mutect2` (default) is the GATK standard; `muse` gives no indels; `varscan` alone has many false positives |
 
-A caller runs only when its calls are used: with the consensus, when its `use_<caller>` switch is on; without it, when
-it is `somatic_caller`. Before the vote each caller is reduced to its own passing set (Mutect2 and Strelka2 PASS, MuSE
-without `muse_exclude_tier`, VarScan2 somatic status SS=2), split into single alleles and left-aligned so that the same
-variant matches across callers. MuSE calls SNVs only, so indels are voted on by Mutect2, Strelka2 and VarScan2.
+**How the vote works.** Only the callers the mode needs are run. Each caller's calls are first reduced to its own
+passing set (Mutect2 and Strelka2 PASS, MuSE without `muse_exclude_tier`, VarScan2 somatic status SS=2), split into
+single alleles and left-aligned, so that the same variant matches across callers. SNVs and indels have their own
+threshold. MuSE does not vote on indels, and a threshold above the number of callers that ran is lowered to that number.
+Calls below the threshold are kept with FILTER `LOWCONSENSUS` (`consensus_filter_mode: tag`) or dropped (`remove`).
+`INFO/CALLERS` and `INFO/NCALLERS` list the supporting callers; in a true consensus `INFO/M2_FILTER` keeps the Mutect2
+filters of a call Mutect2 filtered but the others outvoted, and `INFO/CONS_SOURCE` names the caller whose record is used
+for a call Mutect2 never made. Without Mutect2, and for a single caller other than Mutect2, the VCF has its own layout
+(normal, tumour; `GT:AD:AF:DP`); a single caller's file is `<S>_single_<caller>.vcf.gz`.
 
-| Parameter | Values (default first) | Effect |
+| Parameter | Values (default first) | Meaning |
 |---|---|---|
-| `somatic_consensus` | `true` \| `false` | `true`: vote across callers; `false`: one caller (`somatic_caller`), no vote |
-| `somatic_caller` | `mutect2` \| `strelka2` \| `muse` \| `varscan` | `somatic_consensus: false` only. `mutect2` gives its own filtered VCF; another caller's somatic PASS calls are written in one VCF (normal, tumour; `GT:AD:AF:DP`), `<S>_single_<caller>.vcf.gz`, without Mutect2's contamination, orientation-bias or panel-of-normals filtering. `muse` gives SNVs only; `varscan` alone has a high false-positive rate |
-| `consensus_backbone` | `mutect2` \| `union` | `mutect2`: only Mutect2 PASS calls are voted on. `union`: every caller's calls are voted on, Mutect2 as one vote; a call Mutect2 filtered is kept when the others outvote it (its Mutect2 filters in `INFO/M2_FILTER`), and a call Mutect2 never made is taken from Strelka2, VarScan2 or MuSE (`INFO/CONS_SOURCE`) |
-| `use_mutect2` | `true` \| `false` | Mutect2 votes in the consensus. `false`: a vote among Strelka2, MuSE and VarScan2 only, so set `consensus_backbone: union` (the `mutect2` backbone votes on Mutect2's calls) and turn on at least two of them. For a single caller use `somatic_consensus: false` and `somatic_caller` instead |
-| `use_strelka2`, `use_muse`, `use_varscan` | `true` \| `false` | Strelka2, MuSE (needs `dbsnp`) and VarScan2 vote; `false` = that caller does not run. With Mutect2 at least one must be on |
-| `consensus_min_snv_callers` | `2` | callers needed for an SNV (≥ 2; lowered to the number of callers that ran). `1` only with `consensus_backbone: mutect2`: every Mutect2 PASS call is kept, with its support in `INFO/NCALLERS` (the sensitive preset) |
-| `consensus_min_indel_callers` | `2` | callers needed for an indel; same rules |
-| `consensus_filter_mode` | `tag` \| `remove` | `tag`: calls below the threshold stay with FILTER `LOWCONSENSUS`; `remove`: they are dropped |
+| `somatic_consensus` | `true` \| `false` | `true`: vote across callers; `false`: one caller, `somatic_caller` |
+| `somatic_caller` | `mutect2` \| `strelka2` \| `muse` \| `varscan` | The one caller (`somatic_consensus: false` only) |
+| `consensus_backbone` | `mutect2` \| `union` | `mutect2`: vote on Mutect2 PASS calls; `union`: vote on every caller's calls |
+| `use_mutect2`, `use_strelka2`, `use_muse`, `use_varscan` | `true` \| `false` | Caller votes (`somatic_consensus: true` only); `false`: it does not run. MuSE needs `dbsnp` |
+| `consensus_min_snv_callers`, `consensus_min_indel_callers` | `2` | Callers needed for an SNV / an indel (≥ 2) |
+| `consensus_filter_mode` | `tag` \| `remove` | Calls below the threshold: labelled `LOWCONSENSUS`, or dropped |
 | `muse_exclude_tier` | `Tier5` | MuSE tier not counted as a vote |
 
-Invalid combinations (a threshold below 2, or below 1 with the Mutect2 backbone; Mutect2 with no other caller; `use_mutect2: false` with the Mutect2 backbone or
-fewer than two other callers) stop the run at start-up. Pairs that include MuSE vote on indels with one caller only;
-Strelka2 + VarScan2 avoids this.
+The run stops at start-up with a message when the settings cannot give a vote: a threshold below 2; Mutect2 with no
+other caller switched on; or `use_mutect2: false` with the Mutect2 backbone or with
+fewer than two other callers. With MuSE as one of only two callers, indels are called by one caller only; Strelka2 +
+VarScan2 avoids this.
 
 A Mutect2 multi-nucleotide variant is kept as one record so that it is annotated at the codon level; another caller
-counts as a vote for it only when it reports every base change of that variant. `INFO/CALLERS` and `INFO/NCALLERS` list
-the supporting callers in both modes. `FILTER_SOMATIC_VCF` then applies the tumor VAF, alt-read, depth and matched-normal
+counts as a vote for it only when it reports every base change of that variant. `FILTER_SOMATIC_VCF` then applies the tumor VAF, alt-read, depth and matched-normal
 limits (`filter_*` parameters) and, with `somatic_filter_mode: tag` (default), labels failures instead of dropping them.
 VAF is alt / (ref + alt) from FORMAT/AD for every caller (Mutect2's FORMAT/AF is a model estimate). The MAF columns
 `Tumor_VAF` and `Normal_VAF` use the same definition. `Tumor_Sample_Barcode` is the tumor sample ID (germline MAF: the

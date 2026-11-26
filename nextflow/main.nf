@@ -281,13 +281,11 @@ def validateParams() {
                     error "ERROR: params.use_${c}_in_consensus was renamed use_${c}"
             }
             if (params.somatic_consensus) {
-                // a vote needs >= 2 voters and a threshold >= 2; 1 only on the Mutect2 backbone
-                // (every Mutect2 PASS call kept, annotated with its support: the sensitive preset)
-                def min_thr = (params.consensus_backbone == 'mutect2') ? 1 : 2
+                // a vote needs >= 2 voters and a threshold >= 2
                 ['consensus_min_snv_callers', 'consensus_min_indel_callers'].each { k ->
                     def v = params[k]
-                    if (!(v instanceof Integer) || v < min_thr)
-                        error "ERROR: ${k} must be an integer >= ${min_thr} with consensus_backbone: ${params.consensus_backbone} (got '${v}'). For one caller set somatic_consensus: false and somatic_caller."
+                    if (!(v instanceof Integer) || v < 2)
+                        error "ERROR: ${k} must be an integer >= 2 (got '${v}'). For one caller set somatic_consensus: false and somatic_caller."
                 }
                 def others = [params.use_strelka2, params.use_muse, params.use_varscan].count { v -> v }
                 if (params.use_mutect2) {

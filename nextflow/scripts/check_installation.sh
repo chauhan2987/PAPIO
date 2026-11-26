@@ -102,7 +102,7 @@ ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 ASSAY=$(yget assay wes)
 ANALYSIS=$(yget analysis germline)
 START_AT=$(yget start_at mapping)
-STOP_AT=$(yget stop_at annotation)
+STOP_AT=$(yget stop_at classification)
 START_R=$(rank "$START_AT"); STOP_R=$(rank "$STOP_AT")
 
 echo "PAPIO pre-flight check"
@@ -137,8 +137,10 @@ section "Run paths"
 ## pipeline_root = the repository root (genomics_pipeline/, holding nextflow/main.nf); only printed in
 ## the run header (the pipeline runs from main.nf's own folder). The nextflow/ folder itself is also accepted.
 PR=$(yget pipeline_root)
-if [ -n "$PR" ] && { [ -s "${PR}/nextflow/main.nf" ] || [ -s "${PR}/main.nf" ]; }; then pass "pipeline_root (nextflow/main.nf found)"
-else warn "pipeline_root: no nextflow/main.nf in '${PR:-not set}' (should be the repository root; shown in the run header only)"; fi
+[ -n "$PR" ] && [ -d "$PR" ] && PR=$(CDPATH= builtin cd "$PR" >/dev/null && builtin pwd -P)    # resolve '..' for display
+if [ -n "$PR" ] && [ -s "${PR}/nextflow/main.nf" ]; then pass "pipeline root: ${PR} (contains nextflow/main.nf)"
+elif [ -n "$PR" ] && [ -s "${PR}/main.nf" ]; then warn "pipeline root '${PR}' is the nextflow/ folder; set pipeline_root to the repository root (\${projectDir}/..)"
+else warn "pipeline root '${PR:-not set}' does not contain nextflow/main.nf (set pipeline_root to the repository root; shown in the run header only)"; fi
 for key in work_root outdir; do
     p=$(yget "$key")
     if [ -z "$p" ]; then fail "$key not set"; continue; fi
@@ -164,12 +166,15 @@ case "${ASSAY}:${ANALYSIS}" in
 esac
 ## drop images whose step is switched off in this params file
 drop() { REQ=$(echo " $REQ " | sed "s/ $1 / /"); }
-[ "$(yget use_fusioncatcher true)" = "false" ] && drop container_fusioncatcher
+[ "$(yget use_fusioncatcher false)" = "true" ] || drop container_fusioncatcher
 [ "$(yget use_arriba true)" = "false" ]        && drop container_arriba
 [ "$(yget use_starfusion true)" = "false" ] && [ "$(yget use_fusioninspector true)" = "false" ] && drop container_starfusion
-[ "$(yget use_muse_in_consensus true)" = "false" ]     && drop container_muse
-[ "$(yget use_varscan_in_consensus true)" = "false" ]  && drop container_varscan
-[ "$(yget use_strelka2_in_consensus true)" = "false" ] && drop container_strelka
+## a somatic caller runs when its use_<caller> is on (consensus) or it is somatic_caller (consensus off)
+caller_on() { if [ "$(yget somatic_consensus true)" = "false" ]; then [ "$(yget somatic_caller mutect2)" = "$1" ]
+              else [ "$(yget use_$1 true)" != "false" ]; fi; }
+caller_on muse     || drop container_muse
+caller_on varscan  || drop container_varscan
+caller_on strelka2 || drop container_strelka
 [ "$(yget generate_maf true)" = "false" ]              && drop container_vcf2maf
 [ "$ANALYSIS" = "germline" ] && [ "$(yget germline_caller haplotypecaller)" = "deepvariant" ] && REQ="$REQ container_deepvariant"
 [ "$(yget mutational_signatures false)" = "true" ] && REQ="$REQ container_signatures"
@@ -228,9 +233,12 @@ if [ "$ASSAY" != "rna" ]; then
         chk_indexed somalier_sites opt "sample-swap check skipped"
         if [ -n "$(yget somalier_ancestry_labels)" ]; then chk_file somalier_ancestry_labels opt; chk_dir somalier_1kg_dir opt "ancestry skipped"; fi
         if [ "$ANALYSIS" = "somatic" ]; then
-            chk_indexed germline_resource req "Mutect2"
-            chk_indexed panel_of_normals  opt "more Mutect2 false positives"
-            chk_indexed pileup_variants   opt "contamination filtering skipped"
+            if caller_on mutect2; then
+                chk_indexed germline_resource req "Mutect2"
+                chk_indexed panel_of_normals  opt "more Mutect2 false positives"
+                chk_indexed pileup_variants   opt "contamination filtering skipped"
+            fi
+            caller_on muse && chk_indexed dbsnp req "MuSE"
             chk_file cnvkit_pon     opt "CNVkit uses the matched normal as its reference"
             chk_file msisensor_list opt "MSI skipped"
             chk_file sequenza_gc_wiggle opt "Sequenza purity/LOH skipped"
@@ -238,7 +246,7 @@ if [ "$ASSAY" != "rna" ]; then
         if [ "$ANALYSIS" = "germline" ]; then
             [ "$(yget germline_caller haplotypecaller)" = "haplotypecaller" ] && chk_indexed dbsnp req "HaplotypeCaller"
             for k in hapmap omni thousandg_snps mills; do chk_indexed "$k" opt "germline filtering needs it"; done
-            if [ "$(yget run_gcnv true)" = "true" ]; then
+            if [ "$(yget run_gcnv false)" = "true" ]; then
                 chk_file preprocessed_intervals req "gCNV"; chk_file contig_ploidy_priors req "gCNV"
                 chk_dir  gcnv_scatter_intervals req "gCNV"
             fi
@@ -292,7 +300,7 @@ if [ "$ASSAY" = "rna" ]; then
     if runs variant_calling; then
         [ "$(yget use_arriba true)" = "true" ] && { chk_file arriba_blacklist opt "Arriba precision drops sharply"
             chk_file arriba_known_fusions opt; chk_file arriba_protein_domains opt; }
-        [ "$(yget use_fusioncatcher true)" = "true" ] && chk_dir fusioncatcher_db req "or set use_fusioncatcher: false"
+        [ "$(yget use_fusioncatcher false)" = "true" ] && chk_dir fusioncatcher_db req "or set use_fusioncatcher: false"
         chk_file known_fusions_tsv opt "known-fusion rescue limited"
     fi
     runs metrics && { chk_file refflat opt "RNA-seq metrics skipped"; chk_file rrna_interval_list opt "%rRNA skipped"; }

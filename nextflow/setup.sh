@@ -46,7 +46,7 @@
 #                            <KIT>_scatter_24_pad250/); built later: <KIT>_cnvkit_pon.cnn,
 #                            <KIT>_inhouse_pon.vcf.gz
 #     references/gencode/ star/ (StarIndex_gencode_v49/, gencode.v49.annotation.transcripts.fa) rna_qc/ ctat/ arriba/ fusion/ fusioncatcher/
-#     references/trust4/ telescope/ refphi/
+#     references/trust4/ telescope/
 #
 #   Site overrides (mirrors, registry): export PAPIO_SETUP_CONF=<file>; the file is
 #   sourced after the defaults below and may redefine any of the URL variables.
@@ -89,7 +89,6 @@ URL_SOMALIER_LABELS=https://raw.githubusercontent.com/brentp/somalier/master/scr
 URL_SOMALIER_1KG="https://zenodo.org/record/3479773/files/1kg.somalier.tar.gz?download=1"
 URL_TRUST4=https://raw.githubusercontent.com/liulab-dfci/TRUST4/master
 URL_HERV=https://media.githubusercontent.com/media/mlbendall/telescope_annotation_db/master/builds/HERV_rmsk.hg38.v2/transcripts.gtf
-URL_REFPHI=https://raw.githubusercontent.com/humengying0907/InstaPrismSourceCode/main/refPhi/RCC_refPhi.RDS
 URL_COSMIC_API=https://cancer.sanger.ac.uk/api/mono/products/v1/downloads/scripted
 COSMIC_VERSION=v104
 ## reportable genes for the germline LoF report and per-gene coverage (README Appendix A, step 6.2);
@@ -174,7 +173,7 @@ full_urls() {
         [ "$b" = hg38 ] && echo "${URL_GATK_HG38}/${name}" || echo "${URL_GATK_SOM}/${name}"
     done <<< "$GATK_VCFS"
     echo "$URL_SOMALIER_LABELS"; echo "$URL_SOMALIER_1KG"
-    echo "${URL_TRUST4}/hg38_bcrtcr.fa"; echo "${URL_TRUST4}/human_IMGT+C.fa"; echo "$URL_HERV"; echo "$URL_REFPHI"
+    echo "${URL_TRUST4}/hg38_bcrtcr.fa"; echo "${URL_TRUST4}/human_IMGT+C.fa"; echo "$URL_HERV"
     [ "$DO_GNOMAD" -eq 1 ] && { echo "$URL_GNOMAD_FAF"; echo "${URL_GNOMAD_FAF}.tbi"; }
     [ "$DO_ANNOTSV" -eq 1 ] && echo "$URL_ANNOTSV"
     if [ "$DO_FUSIONCATCHER" -eq 1 ]; then for p in $FUSIONCATCHER_PARTS; do echo "${URL_FUSIONCATCHER}/${p}/download"; done; fi
@@ -335,7 +334,7 @@ cosmic_get() {
 write_full_params() {
     local f out k v
     mkdir -p "${DIR}/params"
-    for f in "${PIPELINE_DIR}"/params/params_{somatic,somatic_sensitive,germline,rna_fusion}.yaml; do
+    for f in "${PIPELINE_DIR}"/params/params_{somatic,germline,rna_fusion}.yaml; do
         out="${DIR}/params/$(basename "$f")"
         ## the templates use the README layout (${projectDir}/../references etc.); write this install's folders
         sed -e "s#\${projectDir}/\.\./references#${R}#g" -e "s#\${projectDir}/\.\./containers#${CONTAINERS}#g" \
@@ -704,12 +703,11 @@ if [ ! -s "${R}/fusion/known_fusions_hg38_GRCh38_v2.5.1.tsv" ]; then
     zcat "${R}/arriba/known_fusions_hg38_GRCh38_v2.5.1.tsv.gz" > "${R}/fusion/known_fusions_hg38_GRCh38_v2.5.1.tsv"
     [ "$KEEP" -eq 1 ] || rm -rf "${DL}/arriba_v2.5.1.tar.gz" "${DL}"/arriba_v2.5.1
 fi
-step "RNA immune and expression resources: TRUST4, HERV (Telescope), refPhi (InstaPrism)"
-mkdir -p "${R}/trust4" "${R}/telescope" "${R}/refphi"
+step "RNA immune resources: TRUST4, HERV (Telescope)"
+mkdir -p "${R}/trust4" "${R}/telescope"
 fetch "${URL_TRUST4}/hg38_bcrtcr.fa"    "${R}/trust4/hg38_bcrtcr.fa"
 fetch "${URL_TRUST4}/human_IMGT+C.fa"   "${R}/trust4/human_IMGT+C.fa"
 fetch "$URL_HERV"                       "${R}/telescope/HERV_rmsk.hg38.v2.gtf"
-fetch "$URL_REFPHI"                     "${R}/refphi/RCC_refPhi.RDS"
 grep -q '^>' "${R}/trust4/hg38_bcrtcr.fa" || die "${R}/trust4/hg38_bcrtcr.fa is not a FASTA"
 awk -F'\t' '!/^#/ { exit !($3 != "") }' "${R}/telescope/HERV_rmsk.hg38.v2.gtf" || die "HERV GTF looks wrong (Git LFS pointer?)"
 

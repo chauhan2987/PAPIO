@@ -66,9 +66,12 @@ pileup_variants   : ${projectDir}/../references/gatk/small_exac_common_3.hg38.vc
 orientation_bias  : true
 
 somatic_consensus           : true
-use_muse_in_consensus       : true
-use_strelka2_in_consensus   : true
-use_varscan_in_consensus    : true
+somatic_caller              : mutect2 # somatic_consensus: false only - mutect2 | strelka2 | muse | varscan
+consensus_backbone          : mutect2 # mutect2: vote on Mutect2 PASS calls; union: vote over all callers
+use_mutect2                 : true
+use_strelka2                : true
+use_muse                    : true
+use_varscan                 : true
 consensus_min_snv_callers   : 2
 consensus_min_indel_callers : 2
 consensus_filter_mode       : tag     # tag = keep all, label sub-threshold LOWCONSENSUS
