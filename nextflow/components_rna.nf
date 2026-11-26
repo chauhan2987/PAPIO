@@ -85,15 +85,13 @@ process STAR_ALIGN {
                        ? '--quantMode TranscriptomeSAM GeneCounts --quantTranscriptomeSAMoutput BanSingleEnd_ExtendSoftclip'
                        : '--quantMode GeneCounts'
 
-    // -- Chimeric-detection strategy (VERIFIED against STAR issue #1288 + Arriba wiki) --
-    //   STAR's NEW chimeric detection (--chimMultimapNmax > 0) ONLY works with
-    //   --chimOutType Junctions and is INCOMPATIBLE with WithinBAM. So:
-    //   - shared mode  - --chimOutType WithinBAM HardClip Junctions with multimap
-    //     OMITTED (old detection). One run feeds Arriba (WithinBAM) AND STAR-Fusion
-    //     kickstart (Junctions) - the STAR-maintainer-endorsed way to get both.
-    //   - separate mode (params.rna_shared_star=false) - WithinBAM HardClip only,
-    //     with Arriba's recommended --chimMultimapNmax 50 for max multimap
-    //     sensitivity; STAR-Fusion then runs its own bundled STAR (full mode).
+    // -- Chimeric-detection strategy (STAR issue #1288; STAR 2.7.6a release notes; Arriba docs) --
+    //   STAR's multimapping chimeric detection (--chimMultimapNmax > 0) works with
+    //   --chimOutType Junctions, or WithinBAM alone (STAR >= 2.7.6a), but NOT with both together:
+    //   - shared mode  - --chimOutType WithinBAM HardClip Junctions, multimapping OMITTED (old
+    //     detection). One run feeds Arriba (WithinBAM) AND STAR-Fusion kickstart (Junctions).
+    //   - separate mode (params.rna_shared_star=false) - WithinBAM HardClip only, which allows
+    //     Arriba's --chimMultimapNmax (star_chim_multimap_nmax); STAR-Fusion runs its own STAR.
     def shared       = (params.rna_shared_star != false)
     def chim_seg_min = params.star_chim_segment_min ?: 10
     def chim_out     = shared ? 'WithinBAM HardClip Junctions' : 'WithinBAM HardClip'

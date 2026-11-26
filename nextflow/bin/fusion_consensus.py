@@ -114,14 +114,16 @@ def add(store, p5, p3, bp5, bp3, caller, support, extra, strands=("", "")):
     key, g5, g3 = canon_key(p5, p3), p5[1], p3[1]
     d = store.setdefault(key, {
         "genes": (g5, g3), "ctat": (p5[2], p3[2]), "bp5": bp5, "bp3": bp3,
-        "callers": set(), "support": 0, "arriba_conf": "", "type": "", "known": False,
+        "callers": set(), "by_caller": {}, "arriba_conf": "", "type": "", "known": False,
         "alias5": set(), "alias3": set(), "strands": ("", ""), "arriba_best": None
     })
     d["callers"].add(caller)
     d["alias5"] |= p5[3]; d["alias3"] |= p3[3]
     try: sup = int(float(support))
     except Exception: sup = 0
-    d["support"] += sup
+    # reads per caller (summed over that caller's rows for the pair, i.e. its breakpoints);
+    # callers are never added together: they count the same reads
+    d["by_caller"][caller] = d["by_caller"].get(caller, 0) + sup
     # Breakpoints and directional gene order: Arriba's best row for the pair (highest confidence,
     # then most reads; Arriba lists a pair once per breakpoint, in no confidence order), else the
     # first caller that gave breakpoints. The pair's Arriba confidence is that of its best row.
@@ -291,11 +293,15 @@ for key, d in store.items():
         verdict = "PASS_KNOWN"; n_known += 1
     else:
         verdict = "REVIEW"; n_review += 1
+    # TotalSupport = reads of the best-supported caller (not a sum: callers share reads);
+    # SupportByCaller lists every caller's own count
+    support = max(d["by_caller"].values()) if d["by_caller"] else 0
+    by_caller = ";".join(f"{c}:{n}" for c, n in sorted(d["by_caller"].items()))
     out_rows.append([
         f"{g5}--{g3}", g5, g3, d["bp5"], d["bp3"],
-        ",".join(sorted(d["callers"])), str(ncall), str(d["support"]),
+        ",".join(sorted(d["callers"])), str(ncall), str(support),
         d["arriba_conf"] or ".", "yes" if is_known else "no",
-        "yes" if readthrough else "no", verdict
+        "yes" if readthrough else "no", verdict, by_caller
     ])
 
 # sort: PASS_CONSENSUS, PASS_KNOWN, REVIEW; then by caller count / support desc
@@ -306,7 +312,7 @@ with open(f"{SAMPLE}_fusion_consensus.tsv", "w", newline="") as out:
     w = csv.writer(out, delimiter="\t", lineterminator="\n")
     w.writerow(["FusionName","Gene5","Gene3","Breakpoint5","Breakpoint3",
                 "Callers","NumCallers","TotalSupport","Arriba_Confidence",
-                "KnownFusion","ReadThrough","Verdict"])
+                "KnownFusion","ReadThrough","Verdict","SupportByCaller"])
     w.writerows(out_rows)
 
 # FusionInspector candidate list = confident set only (PASS_*), directional "A--B", in the CTAT

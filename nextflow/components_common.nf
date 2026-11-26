@@ -1617,11 +1617,23 @@ process ANNOTATE_SV {
     // WES: restrict to 'split' (per-gene) lines is NOT forced here - full+split
     // are both emitted so whole-gene and per-exon overlaps are visible. Genome
     // build is taken from the pipeline-wide GRCh38 assumption used by VEP.
+    // gCNV segments: GATK writes every segment (copy-neutral ones too, GT 0) with ALT <DEL>,<DUP>;
+    // only the calls (GT 1 = DEL, 2 = DUP vs the contig's ploidy) are annotated, each with its
+    // own ALT and SVTYPE, so neutral segments never appear as CNVs.
+    def sv_input = (source_tag == 'gcnv') ? 'sv_input.vcf' : "${vcf}"
+    def prep = (source_tag == 'gcnv') ? "gcnv_calls_to_sv.sh ${vcf} sv_input.vcf" : ''
     """
     set -euo pipefail
+    ${prep}
+    if [ "\$(zcat -f ${sv_input} | grep -vc '^#' || true)" -eq 0 ]; then
+        echo "ANNOTATE_SV: no ${source_tag} records to annotate" >&2
+        echo -e "AnnotSV_ID\\tSV_chrom\\tSV_start\\tSV_end\\tSV_type\\tGene_name\\tACMG_class" \\
+            > ${meta.sample_id}_${source_tag}_annotsv.tsv
+        exit 0
+    fi
 
     AnnotSV \\
-        -SVinputFile ${vcf} \\
+        -SVinputFile ${sv_input} \\
         -annotationsDir ${annotsv_dir} \\
         -genomeBuild GRCh38 \\
         -SVinputInfo 1 \\

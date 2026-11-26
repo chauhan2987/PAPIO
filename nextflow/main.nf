@@ -380,6 +380,11 @@ def validateRnaParams(int startRank, int stopRank, String sheet) {
             requireParams(['ctat_lib'], "for STAR-Fusion / FusionInspector (CTAT genome library)")
         if (params.use_fusioncatcher)
             requireParams(['fusioncatcher_db'], "for FusionCatcher (or set use_fusioncatcher=false)")
+        // STAR writes the chimeric junction format STAR-Fusion >= 1.9 reads (header + multimapping
+        // columns) only with --chimMultimapNmax > 0, which STAR refuses together with the WithinBAM
+        // output Arriba needs; one shared STAR run therefore cannot feed both callers.
+        if (params.rna_shared_star == true && params.use_starfusion)
+            error "ERROR: rna_shared_star: true cannot feed STAR-Fusion (STAR cannot write STAR-Fusion's chimeric junction format together with Arriba's WithinBAM output). Set rna_shared_star: false (STAR-Fusion then runs its own STAR), or use_starfusion: false."
         warnParams(['known_fusions_tsv'], "single-caller known-fusion RESCUE and known-fusion tiering will be limited")
     }
 

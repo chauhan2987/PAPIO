@@ -151,7 +151,7 @@ for line in rows[1:]:
         col(f, "Arriba_Confidence"), "yes" if is_known else "no",
         "yes" if in_cgc else "no", (r5 or ".") + "|" + (r3 or "."),
         "yes" if readthrough else "no", "yes" if ig_hla else "no",
-        fi_confirmed, fi_reads or ".", verdict, tier
+        fi_confirmed, fi_reads or ".", verdict, tier, col(f, "SupportByCaller", ".")
     ])
 
 order = {"KNOWN_ONCOGENIC":0,"LIKELY_ONCOGENIC":1,"KNOWN_LOW_SUPPORT":2,
@@ -164,7 +164,7 @@ with open(f"{SAMPLE}_fusions_annotated.tsv", "w") as o:
     o.write("\t".join([
         "FusionName","Gene5","Gene3","Breakpoint5","Breakpoint3","Callers","NumCallers",
         "TotalSupport","Arriba_Confidence","KnownFusion","In_CGC","CGC_Roles(5|3)",
-        "ReadThrough","IG_HLA_Locus","FI_Confirmed","FI_JunctionReads","Verdict","TIER"
+        "ReadThrough","IG_HLA_Locus","FI_Confirmed","FI_JunctionReads","Verdict","TIER","SupportByCaller"
     ]) + "\n")
     for r in out:
         o.write("\t".join(r) + "\n")

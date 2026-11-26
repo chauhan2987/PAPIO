@@ -547,7 +547,7 @@ annotates their calls (VEP; ClinVar and gnomAD FAF when given, no COSMIC).
 | | `CRAM_CONVERT` | toggle (`rna_cram_convert`, off) |
 | 3 metrics | `RNASEQ_METRICS` (Picard CollectRnaSeqMetrics; strandedness inferred from the STAR gene counts when `rna_strandedness: auto`); `SAMTOOLS_STATS`; `MULTIQC` | required |
 | 5 variant calling | `ARRIBA` | toggle (`use_arriba`, on) |
-| | `STARFUSION` (its own STAR run on the CTAT library; with `rna_shared_star: true`, kickstart from `STAR_ALIGN`'s chimeric junctions) | toggle (`use_starfusion`, on) |
+| | `STARFUSION` (its own STAR run on the CTAT library; `rna_shared_star: true` is refused with STAR-Fusion, which needs a chimeric-junction format STAR cannot write alongside Arriba's input) | toggle (`use_starfusion`, on) |
 | | `FUSIONCATCHER` | toggle (`use_fusioncatcher`, off; needs `fusioncatcher_db`) |
 | | `FUSION_CONSENSUS` | required |
 | | `FILTER_FUSION_CANDIDATES` → `FUSIONINSPECTOR` | toggle (`use_fusioninspector`, on) |
@@ -623,8 +623,9 @@ fusion is PASS_CONSENSUS when at least `fusion_min_callers` callers (default 2) 
 Ensembl gene IDs, so symbol differences between annotation releases do not split a fusion; the threshold is capped
 at the number of callers that ran, and with Arriba alone its low-confidence calls stay REVIEW), and
 PASS_KNOWN when only one caller reports it but the pair is in the known-fusion list (`known_fusions_tsv`); all other
-calls are REVIEW. A PASS_KNOWN fusion is tiered KNOWN_ONCOGENIC only with at least `fusion_known_min_reads` supporting
-reads (default 3) and, when FusionInspector ran, its confirmation; otherwise it is KNOWN_LOW_SUPPORT. A pair is flagged
+calls are REVIEW. Read support is counted per caller and never added across callers, which see the same reads:
+`TotalSupport` is the count of the best-supported caller and `SupportByCaller` lists each caller's count. A PASS_KNOWN
+fusion is tiered KNOWN_ONCOGENIC only with at least `fusion_known_min_reads` supporting reads (default 3) and, when FusionInspector ran, its confirmation; otherwise it is KNOWN_LOW_SUPPORT. A pair is flagged
 as read-through when Arriba calls it one, or when both genes lie on the same strand with the 5′ partner upstream of the
 3′ partner within `fusion_readthrough_kb` (default 200 kb); duplications and inversions between neighbouring genes
 (FGFR3::TACC3) are not.

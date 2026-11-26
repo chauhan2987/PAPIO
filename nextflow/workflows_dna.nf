@@ -1503,6 +1503,13 @@ workflow DNA_WORKFLOW {
         }
     }
 
+    // DeepVariant's model was trained on raw base qualities: BQSR lowers its accuracy, so it
+    // reads the BAM from before recalibration (HaplotypeCaller and the somatic callers use
+    // the BQSR BAM, as GATK recommends). Re-entry after BQSR has only the recalibrated BAM.
+    def ch_pre_bqsr_bam = ch_active_bam
+    if (params.bqsr && params.germline_caller == 'deepvariant' && !stageRuns('bqsr'))
+        log.warn "DeepVariant: run re-entered after the bqsr stage - it reads the BQSR BAM from input_bam_dir"
+
     // -- STAGE 4 bqsr: base recalibration (bqsr: true) --------------
     if (stageRuns('bqsr')) {
         if (params.bqsr) {
@@ -1538,7 +1545,7 @@ workflow DNA_WORKFLOW {
         if (params.analysis == 'germline' || germline_on_normals) {
 
             GERMLINE_BLOCK(
-                ch_active_bam,
+                (params.germline_caller == 'deepvariant') ? ch_pre_bqsr_bam : ch_active_bam,
                 ch_ref_fasta, ch_ref_fai, ch_ref_dict,
                 ch_dbsnp, ch_dbsnp_tbi,
                 ch_interval_bed,

@@ -132,12 +132,14 @@ elif [ -s snv.vcf.gz ]; then
       || echo "(LoF query failed)" >> $REPORT
 else echo "(no annotated SNV/indel VCF)" >> $REPORT; fi
 
-# AnnotSV rows worth reading: one row per SV (Annotation_mode=full), kept when
-# ACMG class 4/5 OR overlapping a reportable gene. Unknown layout -> all rows.
+# AnnotSV rows worth reading: one row per SV (Annotation_mode=full) that passed the caller's
+# filters (FILTER PASS or '.', as in the somatic report), kept when ACMG class 4/5 OR
+# overlapping a reportable gene. Unknown layout -> all rows.
 filter_annotsv() {
     awk -F'\t' 'BEGIN { while ((getline g < "report_genes.txt") > 0) G[g] = 1 }
         NR == 1 { for (i = 1; i <= NF; i++) h[$i] = i; print; next }
         { if (("Annotation_mode" in h) && $(h["Annotation_mode"]) != "full") next
+          if (("FILTER" in h) && $(h["FILTER"]) != "PASS" && $(h["FILTER"]) != ".") next
           keep = !(("ACMG_class" in h) || ("Gene_name" in h))
           if (("ACMG_class" in h) && $(h["ACMG_class"]) ~ /(^|=)(4|5)$/) keep = 1
           if (!keep && ("Gene_name" in h)) {
@@ -147,13 +149,13 @@ filter_annotsv() {
 }
 
 # -- [2] SV - AnnotSV (Manta diploidSV), ACMG class 4/5 highlighted ------
-printf '\n## [2] GERMLINE SV  (AnnotSV, Manta diploidSV; full rows, ACMG 4/5 or reportable gene)\n' >> $REPORT
+printf '\n## [2] GERMLINE SV  (AnnotSV, Manta diploidSV; PASS, full rows, ACMG 4/5 or reportable gene)\n' >> $REPORT
 if [ -s sv_annotsv.tsv ] && [ "$(wc -l < sv_annotsv.tsv)" -gt 1 ]; then
   filter_annotsv sv_annotsv.tsv >> $REPORT
 else echo "(no annotated SV output)" >> $REPORT; fi
 
 # -- [3] CNV - AnnotSV (gCNV segments) -----------------------------------
-printf '\n## [3] GERMLINE CNV  (AnnotSV, GATK gCNV segments; full rows, ACMG 4/5 or reportable gene)\n' >> $REPORT
+printf '\n## [3] GERMLINE CNV  (AnnotSV, GATK gCNV calls (non-reference segments); full rows, ACMG 4/5 or reportable gene)\n' >> $REPORT
 if [ -s cnv_annotsv.tsv ] && [ "$(wc -l < cnv_annotsv.tsv)" -gt 1 ]; then
   filter_annotsv cnv_annotsv.tsv >> $REPORT
 else echo "(no annotated CNV output)" >> $REPORT; fi
