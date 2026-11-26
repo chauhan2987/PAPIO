@@ -36,7 +36,7 @@ set -euo pipefail
 
 ###### GLOBAL VARIABLES
 ## README layout: genomics_pipeline/{nextflow,references,containers,demo_subset}; this script is in nextflow/scripts/
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(CDPATH= builtin cd "$(dirname "$0")/../.." >/dev/null && builtin pwd -P)
 R=${ROOT}/references
 BUNDLE_VERSION=1.0.0
 BUNDLE_DIR=${ROOT}/test_bundle/papio_test_bundle_v${BUNDLE_VERSION}
@@ -279,7 +279,7 @@ cp "${DEMO_DIR}/demo_selection.tsv" "${DEMO_DIR}/demo_sizes.tsv" "${B}/"
 echo "== params templates"
 PAD=$EXON_PAD
 cat > "${B}/params_templates/params_test_common.yaml" <<EOF
-pipeline_root   : @PIPELINE@
+pipeline_root   : @PIPELINE@                 # repository root (genomics_pipeline/)
 container_dir   : @CONTAINERS@
 bind_paths      : ['@BUNDLE@', '@RUN@']
 fastq_root      : @BUNDLE@/fastq

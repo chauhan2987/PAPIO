@@ -58,7 +58,7 @@ set -euo pipefail
 
 ###### GLOBAL VARIABLES
 PAPIO_VERSION=1.0.0
-PIPELINE_DIR=$(cd "$(dirname "$0")" && pwd)
+PIPELINE_DIR=$(CDPATH= builtin cd "$(dirname "$0")" >/dev/null && builtin pwd -P)
 NF_CONFIG="${PIPELINE_DIR}/nextflow.config"
 ## container registry: an image is pulled as ${REGISTRY}:<image name without .sif>
 REGISTRY=oras://ghcr.io/chauhan2987/papio_containers
@@ -403,12 +403,12 @@ done
 [ -n "$MODE" ] && [ -n "$DIR" ] || usage
 if [ -n "$KIT_ID$KIT_REGIONS$KIT_PROBES" ]; then
     [ -n "$KIT_ID" ] && [ -s "$KIT_REGIONS" ] && [ -s "$KIT_PROBES" ] || die "--kit needs --kit-regions and --kit-probes (existing BED files)"
-    KIT_REGIONS=$(cd "$(dirname "$KIT_REGIONS")" && pwd)/$(basename "$KIT_REGIONS")
-    KIT_PROBES=$(cd "$(dirname "$KIT_PROBES")" && pwd)/$(basename "$KIT_PROBES")
+    KIT_REGIONS=$(CDPATH= builtin cd "$(dirname "$KIT_REGIONS")" >/dev/null && builtin pwd -P)/$(basename "$KIT_REGIONS")
+    KIT_PROBES=$(CDPATH= builtin cd "$(dirname "$KIT_PROBES")" >/dev/null && builtin pwd -P)/$(basename "$KIT_PROBES")
 fi
 for t in curl tar gzip md5sum awk; do command -v "$t" >/dev/null 2>&1 || die "'$t' not found on PATH"; done
 [ -s "$NF_CONFIG" ] || die "nextflow.config not found next to setup.sh ($PIPELINE_DIR)"
-mkdir -p "$DIR"; DIR=$(cd "$DIR" && pwd)
+mkdir -p "$DIR"; DIR=$(CDPATH= builtin cd "$DIR" >/dev/null && builtin pwd -P)
 CONTAINERS="${DIR}/containers"
 
 echo "== PAPIO ${PAPIO_VERSION} setup (${MODE}) in ${DIR}"
@@ -428,7 +428,7 @@ if [ "$MODE" = "test" ]; then
         *XXXXXXX*) die "the test bundle is not published yet (TEST_BUNDLE_URL in setup.sh is a placeholder).
        Build it with scripts/make_test_bundle.sh and pass it: setup.sh --test $DIR --bundle <papio_test_bundle_*.tar.gz>" ;;
         http://*|https://*|ftp://*|file://*) TB="${DIR}/$(basename "$SRC")"; fetch "$SRC" "$TB" ;;
-        *) [ -s "$SRC" ] || die "test bundle not found: $SRC"; TB=$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC") ;;
+        *) [ -s "$SRC" ] || die "test bundle not found: $SRC"; TB=$(CDPATH= builtin cd "$(dirname "$SRC")" >/dev/null && builtin pwd -P)/$(basename "$SRC") ;;
     esac
     ## checksum: the published MD5, or the .md5 file written next to a locally built bundle
     if [ -z "$BUNDLE_SRC" ]; then
@@ -465,7 +465,7 @@ if [ "$MODE" = "test" ]; then
         T="${BUNDLE}/params_templates/params_test_${m}.yaml"
         [ -s "$T" ] || die "missing $T in the bundle"
         sed -e "s#@BUNDLE@#${BUNDLE}#g" -e "s#@CONTAINERS@#${CONTAINERS}#g" \
-            -e "s#@PIPELINE@#${PIPELINE_DIR}#g" -e "s#@RUN@#${DIR}/runs#g" "$T" > "${DIR}/params_test_${m}.yaml"
+            -e "s#@PIPELINE@#$(dirname "$PIPELINE_DIR")#g" -e "s#@RUN@#${DIR}/runs#g" "$T" > "${DIR}/params_test_${m}.yaml"
     done
     [ "$PULL" -eq 1 ] || for s in $(sed -nE "s/^[[:space:]]*container_[a-z0-9_]+[[:space:]]*=[[:space:]]*'([^']+\.sif)'.*/\1/p" "$NF_CONFIG" | sort -u); do
         [[ " ${TEST_SKIP_IMAGES} " == *" ${s} "* ]] || [ -s "${CONTAINERS}/${s}" ] || echo "  WARN: ${CONTAINERS}/${s} missing"

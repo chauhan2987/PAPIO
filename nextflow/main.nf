@@ -454,7 +454,7 @@ def printSummary() {
 -  Start stage     : ${pad(params.start_at, col)}-
 -  Stop  stage     : ${pad(params.stop_at, col)}-
 ----------------------------------------------------------------
--  Pipeline root   : ${pad(params.pipeline_root, col)}-
+-  Pipeline root   : ${pad(params.pipeline_root ? file(params.pipeline_root.toString()).toString() : '', col)}-
 -  Ref FASTA       : ${pad(params.ref_fasta, col)}-
 -  Ref index dir   : ${pad(params.ref_index_dir, col)}-
 -  Scatter ints    : ${pad(params.scatter_intervals, col)}-

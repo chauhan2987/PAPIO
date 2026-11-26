@@ -2,10 +2,10 @@
 #  PAPIO - somatic tumour-normal WES (precision-oriented defaults)
 #  Demo data: SEQC2 HCC1395 (tumour) / HCC1395BL (normal), Agilent SureSelect V6+UTR
 #
-#  Run from genomics_pipeline/nextflow/. Paths follow the README layout:
+#  Run from any folder (README: genomics_pipeline/). Paths follow the README layout:
 #  ${projectDir} (expanded by Nextflow) is this nextflow/ folder; references/,
 #  containers/, demo/ and runs/ sit next to it. Edit a path only if yours differ.
-#  1. bash scripts/download_demo_fastq.sh ../demo
+#  1. bash nextflow/scripts/download_demo_fastq.sh demo        (from genomics_pipeline/)
 #  2. set the capture kit and optional resources below
 #  3. bash scripts/check_installation.sh params/params_somatic.yaml
 #  4. nextflow run main.nf -params-file params/params_somatic.yaml            # LSF (default)
@@ -13,7 +13,7 @@
 # ==============================================================================
 
 # ---- run paths ---------------------------------------------------------------
-pipeline_root   : ${projectDir}
+pipeline_root   : ${projectDir}/..
 work_root       : ${projectDir}/../runs/somatic_demo
 outdir          : ${projectDir}/../runs/somatic_demo/Result
 container_dir   : ${projectDir}/../containers
@@ -75,13 +75,13 @@ consensus_filter_mode       : tag     # tag = keep all, label sub-threshold LOWC
 somatic_filter_mode         : tag     # tag = keep all, label failing filters
 
 # ---- CNV / purity / MSI / QC (each optional; step skipped if unset) -----------
-cnvkit_pon         : ${projectDir}/../references/capture/S07604624/S07604624_cnvkit_pon.cnn   # must be built for the SAME capture kit
+cnvkit_pon         : null   # or ${projectDir}/../references/capture/<KIT>/<KIT>_cnvkit_pon.cnn, built for the same capture kit
 msisensor_list     : ${projectDir}/../references/msi/GRCh38.d1.vd1.msisensor.list
 sequenza_gc_wiggle : ${projectDir}/../references/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz
 gene_bed           : ${projectDir}/../references/annotation/ensembl115_genes.bed
 tmb_coding_bed     : ${projectDir}/../references/annotation/ensembl115_MANE_CDS.bed   # WES TMB territory = capture x CDS (README Appendix A, step 6)
 arm_bed            : ${projectDir}/../references/annotation/GRCh38_arms.bed   # chromosome arms (README Appendix A, step 6.3)
-verifybamid_db     : ${projectDir}/../references/verifybamid2/1000g.phase3.100k.b38
+verifybamid_db     : null   # optional VerifyBamID2 resource prefix (normals), e.g. ${projectDir}/../references/verifybamid2/1000g.phase3.100k.b38
 somalier_sites     : ${projectDir}/../references/somalier/sites.hg38.vcf.gz
 somalier_ancestry_labels : ${projectDir}/../references/somalier/ancestry-labels-1kg.tsv   # ancestry of normals (optional)
 somalier_1kg_dir         : ${projectDir}/../references/somalier/1kg-somalier

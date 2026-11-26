@@ -88,7 +88,7 @@ genomics_pipeline/
 |-- make_refflat.py           # refFlat for Picard RNA metrics (Appendix A, section 8.6)
 |-- containers/               # Singularity images (*.sif)
 |-- references/               # reference data (Appendix A; same layout as setup.sh --full)
-|-- demo/                     # demonstration FASTQs + samplesheets (nextflow/scripts/download_demo_fastq.sh ../demo)
+|-- demo/                     # demonstration FASTQs + samplesheets (nextflow/scripts/download_demo_fastq.sh demo)
 |-- runs/                     # work_root / outdir of the runs (nextflow/params/*.yaml)
 |-- README.md
 ```
@@ -257,7 +257,7 @@ write_manifest:         true
 preflight_references:   true            # check references before any job is submitted
 
 # ---------------- Input / output ----------------
-pipeline_root:          ${projectDir}                  # the nextflow/ folder (holds main.nf)
+pipeline_root:          ${projectDir}/..               # repository root (genomics_pipeline/); ${projectDir} = its nextflow/ folder
 container_dir:          ${projectDir}/../containers
 fastq_root:             ${projectDir}/../demo/fastq
 work_root:              ${projectDir}/../runs/somatic_demo

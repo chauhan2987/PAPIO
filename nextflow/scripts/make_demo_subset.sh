@@ -31,7 +31,7 @@ set -euo pipefail
 
 ###### GLOBAL VARIABLES
 ## README layout: genomics_pipeline/{nextflow,references,containers,demo,runs}; this script is in nextflow/scripts/
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(CDPATH= builtin cd "$(dirname "$0")/../.." >/dev/null && builtin pwd -P)
 R=${ROOT}/references
 DEMO_DIR=${ROOT}/demo_subset
 PATIENT_ID=valid1

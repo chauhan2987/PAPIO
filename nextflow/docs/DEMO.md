@@ -8,7 +8,7 @@ Two separate paths:
 | Data | demo reads (truth-variant and microsatellite targets of one chromosome for DNA; fusion partner genes for RNA) | full SEQC2 WES pair + HCC1395 RNA-seq |
 | References | test bundle (one chromosome cut to the demo windows, mini CTAT library), tens of MB; setup builds its bwa-mem2 and STAR indexes in a few minutes | full GRCh38 resources |
 | Hardware | one Linux server, 16 CPUs, 64 GB RAM, no scheduler | HPC (LSF / SLURM) or a large server |
-| Setup | `bash setup.sh --test <dir>` | `bash setup.sh --full <dir>` |
+| Setup | `bash nextflow/setup.sh --test <dir>` | `bash nextflow/setup.sh --full <dir>` |
 | Check | `scripts/compare_to_expected.sh` | `rtg vcfeval` against SEQC2 truth |
 
 The test run checks **execution, not accuracy**: its calls are not
@@ -20,18 +20,18 @@ comparable with the manuscript's benchmark numbers.
 
 ```bash
 git clone https://github.com/chauhan2987/PAPIO.git genomics_pipeline
-cd genomics_pipeline/nextflow                 # every command in this file runs from here
-bash setup.sh --test ~/papio_test              # containers + test bundle + params files
+cd genomics_pipeline                          # every command in this file runs from here (as in the README)
+bash nextflow/setup.sh --test ~/papio_test              # containers + test bundle + params files
 
-bash scripts/check_installation.sh ~/papio_test/params_test_somatic.yaml
+bash nextflow/scripts/check_installation.sh ~/papio_test/params_test_somatic.yaml
 
-nextflow run main.nf -params-file ~/papio_test/params_test_somatic.yaml  -profile local
-nextflow run main.nf -params-file ~/papio_test/params_test_germline.yaml -profile local
-nextflow run main.nf -params-file ~/papio_test/params_test_rna.yaml      -profile local
+nextflow run nextflow/main.nf -params-file ~/papio_test/params_test_somatic.yaml  -profile local
+nextflow run nextflow/main.nf -params-file ~/papio_test/params_test_germline.yaml -profile local
+nextflow run nextflow/main.nf -params-file ~/papio_test/params_test_rna.yaml      -profile local
 
-bash scripts/compare_to_expected.sh check ~/papio_test/runs/test_somatic/Result  tests/expected/somatic
-bash scripts/compare_to_expected.sh check ~/papio_test/runs/test_germline/Result tests/expected/germline
-bash scripts/compare_to_expected.sh check ~/papio_test/runs/test_rna/Result      tests/expected/rna
+bash nextflow/scripts/compare_to_expected.sh check ~/papio_test/runs/test_somatic/Result  nextflow/tests/expected/somatic
+bash nextflow/scripts/compare_to_expected.sh check ~/papio_test/runs/test_germline/Result nextflow/tests/expected/germline
+bash nextflow/scripts/compare_to_expected.sh check ~/papio_test/runs/test_rna/Result      nextflow/tests/expected/rna
 ```
 
 `-profile slurm` on a SLURM cluster; no profile = LSF. Edit the CPU/memory
@@ -60,11 +60,11 @@ fusions is identical.
 ## 2. Full benchmark
 
 ```bash
-bash setup.sh --full ~/papio_full                     # public GRCh38 resources + indexes + params files
-bash scripts/download_demo_fastq.sh ~/papio_full/demo  # SEQC2 FASTQs (MD5-verified) + samplesheets (path used by the params files)
+bash nextflow/setup.sh --full ~/papio_full                     # public GRCh38 resources + indexes + params files
+bash nextflow/scripts/download_demo_fastq.sh ~/papio_full/demo  # SEQC2 FASTQs (MD5-verified) + samplesheets (path used by the params files)
 # add the capture-kit BED/interval lists and (optionally) COSMIC, then:
-bash scripts/check_installation.sh ~/papio_full/params/params_somatic.yaml
-nextflow run main.nf -params-file ~/papio_full/params/params_somatic.yaml
+bash nextflow/scripts/check_installation.sh ~/papio_full/params/params_somatic.yaml
+nextflow run nextflow/main.nf -params-file ~/papio_full/params/params_somatic.yaml
 ```
 
 ---
@@ -76,16 +76,16 @@ nextflow run main.nf -params-file ~/papio_full/params/params_somatic.yaml
 # 2. demo reads: picks the smallest chromosome with ≥ 50 truth SNVs and ≥ 5 truth indels, keeps
 #    the capture targets holding a truth variant + 100 microsatellite targets (demo windows) and
 #    caps the RNA at 100,000 non-chimeric pairs (all chimeric pairs kept)
-bash scripts/make_demo_subset.sh
+bash nextflow/scripts/make_demo_subset.sh
 # 3. test bundle: cuts resources, VEP cache and MSI list to the demo windows, builds targets +
 #    scatter + mini CTAT library; ships no index (setup.sh --test builds them); fails if any
 #    file is > 95 MB or the tarball > 150 MB (GitHub / Zenodo friendly)
-bash scripts/make_test_bundle.sh
-# 4. try it first:  bash setup.sh --test ~/papio_test --bundle <papio_test_bundle_*.tar.gz>
+bash nextflow/scripts/make_test_bundle.sh
+# 4. try it first:  bash nextflow/setup.sh --test ~/papio_test --bundle <papio_test_bundle_*.tar.gz>
 #    then upload the tarball to Zenodo; set TEST_BUNDLE_URL and TEST_BUNDLE_MD5 in setup.sh
 # 5. run section 1 yourself, then record the expected outputs:
-bash scripts/compare_to_expected.sh record ~/papio_test/runs/test_somatic/Result  tests/expected/somatic
-bash scripts/compare_to_expected.sh record ~/papio_test/runs/test_germline/Result tests/expected/germline
-bash scripts/compare_to_expected.sh record ~/papio_test/runs/test_rna/Result      tests/expected/rna
-# 6. commit tests/expected/ and the three pipeline_trace.txt files (demo compute requirements)
+bash nextflow/scripts/compare_to_expected.sh record ~/papio_test/runs/test_somatic/Result  nextflow/tests/expected/somatic
+bash nextflow/scripts/compare_to_expected.sh record ~/papio_test/runs/test_germline/Result nextflow/tests/expected/germline
+bash nextflow/scripts/compare_to_expected.sh record ~/papio_test/runs/test_rna/Result      nextflow/tests/expected/rna
+# 6. commit nextflow/tests/expected/ and the three pipeline_trace.txt files (demo compute requirements)
 ```

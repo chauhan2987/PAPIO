@@ -2,10 +2,10 @@
 #  PAPIO - RNA fusion detection (bulk RNA-seq)
 #  Demo data: HCC1395 RNA-seq SRR9134735 - samplesheets/rna_fusion.csv
 #
-#  Run from genomics_pipeline/nextflow/. Paths follow the README layout:
+#  Run from any folder (README: genomics_pipeline/). Paths follow the README layout:
 #  ${projectDir} (expanded by Nextflow) is this nextflow/ folder; references/,
 #  containers/, demo/ and runs/ sit next to it. Edit a path only if yours differ.
-#  1. bash scripts/download_demo_fastq.sh ../demo
+#  1. bash nextflow/scripts/download_demo_fastq.sh demo        (from genomics_pipeline/)
 #  2. set the capture kit and optional resources below
 #  3. bash scripts/check_installation.sh params/params_rna_fusion.yaml
 #  4. nextflow run main.nf -params-file params/params_rna_fusion.yaml         # LSF (default)
@@ -18,7 +18,7 @@
 # ==============================================================================
 
 # ---- run paths ---------------------------------------------------------------
-pipeline_root   : ${projectDir}
+pipeline_root   : ${projectDir}/..
 work_root       : ${projectDir}/../runs/rna_demo
 outdir          : ${projectDir}/../runs/rna_demo/Result
 container_dir   : ${projectDir}/../containers

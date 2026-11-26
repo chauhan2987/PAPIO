@@ -111,6 +111,6 @@ done <<< "$RUNS"
 
 echo
 echo "Done."
-echo "  params.fastq_root      : $(cd "$FASTQ_DIR" && pwd)"
-echo "  params.dna_samplesheet : $(cd "$SHEET_DIR" && pwd)/dna_somatic.csv   (germline: dna_germline.csv)"
-echo "  params.rna_samplesheet : $(cd "$SHEET_DIR" && pwd)/rna_fusion.csv"
+echo "  params.fastq_root      : $(CDPATH= builtin cd "$FASTQ_DIR" >/dev/null && builtin pwd -P)"
+echo "  params.dna_samplesheet : $(CDPATH= builtin cd "$SHEET_DIR" >/dev/null && builtin pwd -P)/dna_somatic.csv   (germline: dna_germline.csv)"
+echo "  params.rna_samplesheet : $(CDPATH= builtin cd "$SHEET_DIR" >/dev/null && builtin pwd -P)/rna_fusion.csv"

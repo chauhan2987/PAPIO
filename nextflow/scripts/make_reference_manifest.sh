@@ -48,7 +48,7 @@ version_hint() {
     case "$key" in
         vep_cache_dir) find "$p/homo_sapiens" -mindepth 1 -maxdepth 1 -type d -name '*_GRCh38' -printf '%f\n' 2>/dev/null | sort | paste -sd, - ;;
         ## CTAT: .../GRCh38_gencode_v44_CTAT_lib_<date>.plug-n-play/ctat_genome_lib_build_dir
-        ctat_lib) basename "$(cd "$p/.." 2>/dev/null && pwd)" ;;
+        ctat_lib) basename "$(CDPATH= builtin cd "$p/.." 2>/dev/null >/dev/null && builtin pwd -P)" ;;
         ## FusionCatcher: .../human_v102 ; AnnotSV: last two path components
         fusioncatcher_db|annotsv_dir) echo "$(basename "$(dirname "$p")")/$(basename "$p")" ;;
         *) case "$p" in
@@ -78,7 +78,7 @@ for key in $KEYS; do
         ## directory fingerprint = MD5 of the sorted (relative path, size) listing:
         ## changes if any file is added, removed or resized; cheap for 30+ GB dirs
         size=$(du -sb "$p" 2>/dev/null | cut -f1)
-        sum=$(cd "$p" && find -L . -type f -printf '%P\t%s\n' 2>/dev/null | LC_ALL=C sort | md5sum | cut -d' ' -f1)
+        sum=$(CDPATH= builtin cd "$p" >/dev/null && find -L . -type f -printf '%P\t%s\n' 2>/dev/null | LC_ALL=C sort | md5sum | cut -d' ' -f1)
         printf '%s\t%s\tdir\t%s\tlisting:%s\t%s\t\t\t\n' "$key" "$p" "$size" "$sum" "$(version_hint "$p" "$key")" >> "$OUT"
     else
         printf '%s\t%s\tMISSING\tNA\tNA\t\t\t\t\n' "$key" "$p" >> "$OUT"

@@ -20,7 +20,7 @@ PARAMS=${1:?usage: check_installation.sh <params.yaml> [nextflow.config]}
 NF_CONFIG=${2:-$(dirname "$0")/../nextflow.config}
 NF_TESTED="26.04.1"
 ## ${projectDir} in a params file is the folder of main.nf (Nextflow expands it); ${launchDir} the run folder
-PROJECT_DIR=$(cd "$(dirname "$NF_CONFIG")" 2>/dev/null && pwd || dirname "$NF_CONFIG")
+PROJECT_DIR=$(CDPATH= builtin cd "$(dirname "$NF_CONFIG")" >/dev/null 2>&1 && builtin pwd -P || dirname "$NF_CONFIG")
 N_PASS=0; N_WARN=0; N_FAIL=0
 
 [ -s "$PARAMS" ] || { echo "ERROR: params file not found: $PARAMS" >&2; exit 1; }
@@ -33,7 +33,7 @@ yget() {
     local v
     v=$(awk -v k="$1" '
         $0 ~ "^"k"[[:space:]]*:" {
-            sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+#.*$/, "")
+            sub(/\r$/, ""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+#.*$/, ""); sub(/[[:space:]]+$/, "")
             gsub(/^["\047]|["\047]$/, ""); print; exit }' "$PARAMS")
     if [ -z "$v" ] || [ "$v" = "null" ] || [ "$v" = "~" ]; then v="${2:-}"; fi
     v=${v//\$\{projectDir\}/$PROJECT_DIR}; v=${v//\$\{baseDir\}/$PROJECT_DIR}; v=${v//\$\{launchDir\}/$PWD}
@@ -134,9 +134,11 @@ fi
 
 ## ---- Run paths --------------------------------------------------------------
 section "Run paths"
+## pipeline_root = the repository root (genomics_pipeline/, holding nextflow/main.nf); only printed in
+## the run header (the pipeline runs from main.nf's own folder). The nextflow/ folder itself is also accepted.
 PR=$(yget pipeline_root)
-if [ -n "$PR" ] && [ -s "${PR}/main.nf" ]; then pass "pipeline_root (main.nf found)"
-else fail "pipeline_root: no main.nf in ${PR:-not set}"; fi
+if [ -n "$PR" ] && { [ -s "${PR}/nextflow/main.nf" ] || [ -s "${PR}/main.nf" ]; }; then pass "pipeline root: ${PR} (contains nextflow/main.nf)"
+else warn "pipeline root '${PR:-not set}' does not contain nextflow/main.nf (set pipeline_root to the repository root; shown in the run header only)"; fi
 for key in work_root outdir; do
     p=$(yget "$key")
     if [ -z "$p" ]; then fail "$key not set"; continue; fi
@@ -282,7 +284,9 @@ if [ "$ASSAY" = "rna" ]; then
     G=$(yget gtf); FAI=$(yget ref_fai)
     if [ -s "$G" ] && [ -s "$FAI" ]; then
         C=$( (zcat -f "$G" 2>/dev/null || true) | grep -v '^#' | head -1 | cut -f1)
-        cut -f1 "$FAI" | grep -qx "$C" && pass "GTF contig naming matches FASTA ($C)" \
+        ## awk reads the whole .fai: 'grep -q' would close the pipe at the first hit and, under
+        ## pipefail, turn a found contig into a failure on a large reference
+        awk -F'\t' -v c="$C" '$1 == c { f = 1 } END { exit !f }' "$FAI" && pass "GTF contig naming matches FASTA ($C)" \
             || fail "GTF contig '$C' not in ref_fai - chromosome naming mismatch"
     fi
     if runs variant_calling; then
@@ -330,8 +334,11 @@ else
         echo ",$HDR," | grep -q ",$col," || fail "samplesheet missing column: $col"
     done
     if runs mapping; then
+        ## as the pipeline (fastqPath): absolute FASTQ paths are used as given; relative paths
+        ## are taken under fastq_root, which is needed only when such paths exist
         FQ=$(yget fastq_root)
-        [ -d "$FQ" ] || fail "fastq_root missing: ${FQ:-not set}"
+        N_REL=0
+        [ -n "$FQ" ] && [ ! -d "$FQ" ] && fail "fastq_root is not a folder: $FQ"
         N_MISS=0; N_ROWS=0
         while IFS=, read -r -a F; do
             N_ROWS=$((N_ROWS+1))
@@ -340,7 +347,12 @@ else
                 [ -z "$i" ] && continue
                 v=$(echo "${F[$((i-1))]:-}" | tr -d '\r')
                 [ -z "$v" ] && continue
-                [ -s "${FQ}/${v}" ] || { N_MISS=$((N_MISS+1)); [ "$N_MISS" -le 5 ] && fail "FASTQ missing: ${FQ}/${v}"; }
+                case "$v" in
+                    /*) fq="$v" ;;
+                    *)  N_REL=$((N_REL+1)); fq="${FQ}/${v}"
+                        [ -n "$FQ" ] || { N_MISS=$((N_MISS+1)); [ "$N_REL" -eq 1 ] && fail "relative FASTQ path ($v) but fastq_root is not set"; continue; } ;;
+                esac
+                [ -s "$fq" ] || { N_MISS=$((N_MISS+1)); [ "$N_MISS" -le 5 ] && fail "FASTQ missing: $fq"; }
             done
         done < <(tail -n +2 "$SHEET")
         [ "$N_MISS" -eq 0 ] && pass "all FASTQs present (${N_ROWS} rows)"

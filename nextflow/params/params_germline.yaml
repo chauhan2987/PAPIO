@@ -2,10 +2,10 @@
 #  PAPIO - germline WES (single sample)
 #  Demo data: SEQC2 HCC1395BL (normal) - samplesheets/dna_germline.csv
 #
-#  Run from genomics_pipeline/nextflow/. Paths follow the README layout:
+#  Run from any folder (README: genomics_pipeline/). Paths follow the README layout:
 #  ${projectDir} (expanded by Nextflow) is this nextflow/ folder; references/,
 #  containers/, demo/ and runs/ sit next to it. Edit a path only if yours differ.
-#  1. bash scripts/download_demo_fastq.sh ../demo
+#  1. bash nextflow/scripts/download_demo_fastq.sh demo        (from genomics_pipeline/)
 #  2. set the capture kit and optional resources below
 #  3. bash scripts/check_installation.sh params/params_germline.yaml
 #  4. nextflow run main.nf -params-file params/params_germline.yaml           # LSF (default)
@@ -13,7 +13,7 @@
 # ==============================================================================
 
 # ---- run paths ---------------------------------------------------------------
-pipeline_root   : ${projectDir}
+pipeline_root   : ${projectDir}/..
 work_root       : ${projectDir}/../runs/germline_demo
 outdir          : ${projectDir}/../runs/germline_demo/Result
 container_dir   : ${projectDir}/../containers
@@ -66,7 +66,7 @@ germline_scatter_intervals : ${projectDir}/../references/capture/S07604624/S0760
 # germline_scatter_intervals : ${projectDir}/../references/capture/S31285117/S31285117_scatter_150_pad100
 
 # ---- QC ----------------------------------------------------------------------
-verifybamid_db : ${projectDir}/../references/verifybamid2/1000g.phase3.100k.b38
+verifybamid_db : null   # optional VerifyBamID2 resource prefix (normals), e.g. ${projectDir}/../references/verifybamid2/1000g.phase3.100k.b38
 somalier_sites : ${projectDir}/../references/somalier/sites.hg38.vcf.gz
 somalier_ancestry_labels : ${projectDir}/../references/somalier/ancestry-labels-1kg.tsv   # ancestry of normals (optional)
 somalier_1kg_dir         : ${projectDir}/../references/somalier/1kg-somalier

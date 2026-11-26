@@ -11,7 +11,7 @@
 # ==============================================================================
 
 # ---- run paths ---------------------------------------------------------------
-pipeline_root   : ${projectDir}
+pipeline_root   : ${projectDir}/..
 work_root       : ${projectDir}/../runs/somatic_demo_sensitive
 outdir          : ${projectDir}/../runs/somatic_demo_sensitive/Result
 container_dir   : ${projectDir}/../containers
@@ -73,13 +73,13 @@ consensus_filter_mode       : tag     # tag = keep all, label sub-threshold LOWC
 somatic_filter_mode         : tag     # tag = keep all, label failing filters
 
 # ---- CNV / purity / MSI / QC (each optional; step skipped if unset) -----------
-cnvkit_pon         : ${projectDir}/../references/capture/S07604624/S07604624_cnvkit_pon.cnn   # must be built for the SAME capture kit
+cnvkit_pon         : null   # or ${projectDir}/../references/capture/<KIT>/<KIT>_cnvkit_pon.cnn, built for the same capture kit
 msisensor_list     : ${projectDir}/../references/msi/GRCh38.d1.vd1.msisensor.list
 sequenza_gc_wiggle : ${projectDir}/../references/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz
 gene_bed           : ${projectDir}/../references/annotation/ensembl115_genes.bed
 tmb_coding_bed     : ${projectDir}/../references/annotation/ensembl115_MANE_CDS.bed   # WES TMB territory = capture x CDS (README Appendix A, step 6)
 arm_bed            : ${projectDir}/../references/annotation/GRCh38_arms.bed   # chromosome arms (README Appendix A, step 6.3)
-verifybamid_db     : ${projectDir}/../references/verifybamid2/1000g.phase3.100k.b38
+verifybamid_db     : null   # optional VerifyBamID2 resource prefix (normals), e.g. ${projectDir}/../references/verifybamid2/1000g.phase3.100k.b38
 somalier_sites     : ${projectDir}/../references/somalier/sites.hg38.vcf.gz
 somalier_ancestry_labels : ${projectDir}/../references/somalier/ancestry-labels-1kg.tsv   # ancestry of normals (optional)
 somalier_1kg_dir         : ${projectDir}/../references/somalier/1kg-somalier
