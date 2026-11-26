@@ -1,8 +1,8 @@
 # PAPIO - Pan-omic Analysis PIpeline for Oncology (v1.0.0)
 
 PAPIO is a Nextflow DSL2 workflow for tumor exome and RNA sequencing. From FASTQ files it produces
-germline variants, somatic SNVs and indels (a four-caller ensemble of Mutect2, Strelka2, MuSE and VarScan2, with two
-voting modes: Mutect2-anchored, or any two callers), copy number and LOH with purity and ploidy,
+germline variants, somatic SNVs and indels (Mutect2, Strelka2, MuSE and VarScan2: a Mutect2-anchored or a true
+N-of-M vote, or one caller), copy number and LOH with purity and ploidy,
 structural variants, microsatellite instability, tumor mutational burden and RNA gene fusions, with
 per-sample QC and one consolidated report per patient. It runs on an HPC cluster (LSF) with Singularity/Apptainer images.
 
@@ -36,7 +36,7 @@ settings for SureSelect V7, used for our own RCC cohort, are shown as commented 
 |---|---|---|---|
 | Somatic | `assay: wes` (or `wgs`), `analysis: somatic` | Matched tumor (DT) and normal (DN) DNA; several tumors of one patient are each paired with the patient's normal | Somatic SNVs/indels from the caller ensemble (VCF, MAF, classification table), copy number and LOH with purity and ploidy (Sequenza, CNVkit), somatic SVs (Manta), MSI, TMB (WES only), contamination, optional mutational signatures, one report per tumor |
 | Germline | `assay: wes` (or `wgs`), `analysis: germline` | Normal DNA (DN) | Germline SNVs/indels (VCF, MAF, classification table), germline SVs (Manta), optional CNVs (gCNV, at least 30 normals of one kit), optional ROH (WGS) and HLA class I typing, one report per sample |
-| Germline within a somatic run | `analysis: somatic`, `germline_on_normals: true` | As somatic | Somatic results plus germline SNVs/indels, classification and a germline report for each matched normal, written in the `somatic/` folders under the normal's sample ID |
+| Germline on a somatic run's normals | `analysis: germline` with `-resume`, the somatic run's `work_root` and samplesheet, its own `outdir` | As somatic (only the normals are called) | As germline; the normals' alignment and QC are reused from the somatic run |
 | RNA fusion | `assay: rna`, `analysis: rna_fusion` | RNA-seq (RN or RT) | STAR alignment and RNA QC, fusions from Arriba and STAR-Fusion (FusionCatcher optional), FusionInspector evidence, tiered fusion table and report; optional Salmon quantification, TCR/BCR (TRUST4) and HERV (Telescope) |
 
 The QC block (coverage, alignment metrics, sex check, contamination, sample-swap check, QC gate) runs in both DNA arms.
@@ -137,9 +137,9 @@ bash nextflow/scripts/compare_to_expected.sh check ~/papio_test/runs/test_rna/Re
 
 For a full installation, `bash nextflow/setup.sh --full <dir>` first checks that every download URL answers, then
 downloads every public GRCh38 resource of Appendix A (sections 2–8), restricts the GATK and somalier VCFs to the
-GRCh38.d1.vd1 contigs, builds the bwa-mem2, STAR, Sequenza and MSIsensor-pro indexes, the Salmon transcript FASTA and the gene, MANE CDS,
-chromosome-arm, reportable-gene coverage, refFlat and rRNA files, fetches the somalier ancestry, TRUST4, HERV (Telescope)
-and refPhi files, and writes params files under `<dir>/params` with the paths filled in (folder layout of
+GRCh38.d1.vd1 contigs, builds the bwa-mem2, STAR, Sequenza and MSIsensor-pro indexes, the Salmon transcript FASTA and the gene,
+MANE CDS, chromosome-arm, reportable-gene coverage, refFlat and rRNA files, fetches the somalier ancestry, TRUST4
+and HERV (Telescope) files, and writes params files under `<dir>/params` with the paths filled in (folder layout of
 `nextflow/params/`). With `--kit <ID> --kit-regions <ID>_Regions.bed --kit-probes <ID>_Covered.bed` (the SureDesign
 design BEDs) it also builds the capture-kit files of sections 4 and 5.2: interval lists, calling shards, call regions
 and gCNV intervals; with `--cosmic` it downloads and prepares COSMIC v104 (section 7.4) with the login in
@@ -331,6 +331,8 @@ panel_of_normals:       ${projectDir}/../references/gatk/1000g_pon.hg38.vcf.gz
 # panel_of_normals:     ${projectDir}/../references/capture/S31285117/S31285117_inhouse_pon.vcf.gz   # optional: main_pon.nf (Appendix A, step 4.5)
 orientation_bias:       true
 consensus_backbone:     mutect2   # mutect2: vote on Mutect2 PASS calls; union: vote over all callers (Mutect2 is one vote)
+use_mutect2:            true      # consensus voter (false = union only, no Mutect2 filters)
+somatic_caller:         mutect2   # somatic_consensus: false only - mutect2 | strelka2 | muse | varscan
 cnvkit_pon:             null      # or ${projectDir}/../references/capture/<KIT>/<KIT>_cnvkit_pon.cnn (same kit)
 msisensor_list:         ${projectDir}/../references/msi/GRCh38.d1.vd1.msisensor.list
 sequenza_gc_wiggle:     ${projectDir}/../references/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz
@@ -338,7 +340,6 @@ gene_bed:               ${projectDir}/../references/annotation/ensembl115_genes.
 arm_bed:                ${projectDir}/../references/annotation/GRCh38_arms.bed
 cosmic_vcf:             ${projectDir}/../references/cosmic/Cosmic_GenomeScreensMutant_Normal_v104_GRCh38.chr_dedup.vcf.gz
 tmb_coding_bed:         ${projectDir}/../references/annotation/ensembl115_MANE_CDS.bed
-germline_on_normals:    false     # true = germline report for each matched normal
 
 # ---------------- Germline arm (analysis: germline) ----------------
 germline_scatter_intervals: ${projectDir}/../references/capture/S07604624/S07604624_scatter_150_pad100
@@ -429,10 +430,12 @@ nextflow run ${HOME}/genomics_pipeline/nextflow/main.nf -c ${HOME}/genomics_pipe
 - Before the first run, `bash nextflow/scripts/check_installation.sh params_demo.yaml` lists anything missing.
   The pipeline itself also stops at start when a required resource is missing (e.g. `dbsnp`, `hapmap`, `omni`,
   `thousandg_snps` and `mills` for HaplotypeCaller; `dbsnp` for MuSE).
-- `-resume` reuses finished tasks from `work_root`; always add it when rerunning the same analysis. With Nextflow
-  26.04 (strict parser) a changed parameter does **not** make cached tasks run again, so PAPIO stops a resumed run whose
-  parameters differ from the run it resumes and lists them. Use a new `work_root` (or drop `-resume`) after changing
-  parameters; `allow_param_change_on_resume: true` downgrades the stop to a warning.
+- `-resume` reuses finished tasks from `work_root`; always add it when rerunning. You can change parameters and
+  resume: PAPIO lists every changed parameter as a warning. With Nextflow 26.04 (strict parser) steps that already
+  finished keep their earlier results; only steps not yet run use the new values, so to recompute a finished step use
+  a new `work_root`. `allow_param_change_on_resume: false` stops the run instead. The list is kept per analysis: a
+  germline run resumed on a somatic run's `work_root` reuses its alignment and QC and lists the settings that differ.
+  Give the germline run its own `outdir`, so that its run report and trace do not replace the somatic run's.
 - **Partial runs:** set `stop_at` (e.g. `variant_calling`). To restart later from published files, set `start_at`
   and the matching input folder (`input_bam_dir` from `markdup` on; `input_vcf_dir` for `annotation`, the folder
   holding `<S>_filtered.vcf.gz`, `<S>_genotyped.vcf.gz` or `<S>.vcf.gz`; `input_annot_dir` for `classification`, the
@@ -496,13 +499,13 @@ the cut-offs is REVIEW.
 | Stage | Processes | Kind |
 |---|---|---|
 | 5 variant calling | `MANTA` (SVs; its candidate indels feed Strelka2) | required |
-| | `MUTECT2` (per shard) → `MERGE_MUTECT2` (merge + FilterMutectCalls) | required |
-| | `LEARN_READ_ORIENTATION_MODEL` | toggle (`orientation_bias`, on) |
-| | `GETPILEUPSUMMARIES` → `CALCULATE_CONTAMINATION` | resource (`pileup_variants`) |
-| | `STRELKA2` → `TAG_STRELKA_AF` | toggle (`use_strelka2_in_consensus`, on) |
-| | `MUSE_CALL` → `MUSE_SUMP` → `TAG_MUSE_AF` | toggle (`use_muse_in_consensus`, on; needs `dbsnp`) |
-| | `VARSCAN` (per shard on WGS) → `VARSCAN_MERGE` → `TAG_VARSCAN_AF` | toggle (`use_varscan_in_consensus`, on) |
-| | `ENSEMBLE_CONSENSUS` | toggle (`somatic_consensus`, on); voting set by `consensus_backbone` (see "Somatic consensus options") |
+| | `MUTECT2` (per shard) → `MERGE_MUTECT2` (merge + FilterMutectCalls) | toggle (`use_mutect2`, on)¹ |
+| | `LEARN_READ_ORIENTATION_MODEL` | toggle (`orientation_bias`, on; with Mutect2) |
+| | `GETPILEUPSUMMARIES` → `CALCULATE_CONTAMINATION` | resource (`pileup_variants`; with Mutect2) |
+| | `STRELKA2` → `TAG_STRELKA_AF` | toggle (`use_strelka2`, on)¹ |
+| | `MUSE_CALL` → `MUSE_SUMP` → `TAG_MUSE_AF` | toggle (`use_muse`, on; needs `dbsnp`)¹ |
+| | `VARSCAN` (per shard on WGS) → `VARSCAN_MERGE` → `TAG_VARSCAN_AF` | toggle (`use_varscan`, on)¹ |
+| | `ENSEMBLE_CONSENSUS` | toggle (`somatic_consensus`, on); voting set by `consensus_backbone` (see "Somatic consensus options"); also formats a single non-Mutect2 `somatic_caller` |
 | | `FILTER_SOMATIC_VCF` | toggle (`somatic_variant_filter`, on) |
 | | `MUTATIONAL_SIGNATURES` | toggle (`mutational_signatures`, off) |
 | | `SEQUENZA` → `SEQUENZA_GENE_LOH` | resource (`sequenza_gc_wiggle`; the gene and arm tables need `gene_bed` and `arm_bed`) |
@@ -515,8 +518,7 @@ the cut-offs is REVIEW.
 | | `ANNOTATE_SV_SOMATIC` | resource (`annotsv_dir`) |
 | | `CONSOLIDATE_PATIENT_REPORT` | toggle (`consolidate_somatic_reports`, on); needs `classify_variants` and the calls of the same run (or `-resume`) |
 
-With `germline_on_normals: true` the germline processes below also run on each normal, and `ANNOTATE_VCF_GERMLINE`
-annotates their calls (VEP; ClinVar and gnomAD FAF when given, no COSMIC).
+¹ With `somatic_consensus: false` the `use_<caller>` switches are ignored and only the caller named in `somatic_caller` runs.
 
 ### Germline arm
 
@@ -585,20 +587,34 @@ the somatic arm as `panel_of_normals`.
 
 All labels are computational pre-classifications for review, not AMP/ASCO/CAP or ACMG/AMP clinical tiers.
 
-**Somatic consensus options.** Mutect2 always runs; Strelka2, MuSE and VarScan2 are added with their
-`use_*_in_consensus` switches (all on by default). MuSE calls SNVs only, so indels are voted on by Mutect2, Strelka2
-and VarScan2. Before the vote each caller's calls are reduced to its own passing set (Mutect2 and Strelka2 PASS, MuSE
+**Somatic consensus options.** Three ways to build the somatic SNV/indel call set:
+
+- **Mutect2-anchored vote** (default; recommended for publication, fresh-frozen or FFPE): Mutect2 PASS calls kept
+  when ≥ N callers agree. Keeps Mutect2's contamination, orientation-bias (FFPE) and panel-of-normals filtering.
+- **True consensus** (`consensus_backbone: union`): N-of-M vote with Mutect2 as one vote (PCAWG / MC3 style); more
+  sensitive. With `use_mutect2: false` it runs without Mutect2 and so without those filters.
+- **One caller** (`somatic_consensus: false`): the calls of `somatic_caller` alone (default Mutect2, the GATK standard).
+
+A caller runs only when its calls are used: with the consensus, when its `use_<caller>` switch is on; without it, when
+it is `somatic_caller`. Before the vote each caller is reduced to its own passing set (Mutect2 and Strelka2 PASS, MuSE
 without `muse_exclude_tier`, VarScan2 somatic status SS=2), split into single alleles and left-aligned so that the same
-variant matches across callers.
+variant matches across callers. MuSE calls SNVs only, so indels are voted on by Mutect2, Strelka2 and VarScan2.
 
 | Parameter | Values (default first) | Effect |
 |---|---|---|
-| `somatic_consensus` | `true` \| `false` | `false`: the final call set is Mutect2 alone (also switch off the other callers to save their run time) |
-| `consensus_backbone` | `mutect2` \| `union` | `mutect2`: only Mutect2 PASS calls are voted on, and a call is kept when enough callers, Mutect2 included, support it. `union`: true N-of-M voting over every caller, with Mutect2 as one vote; a call Mutect2 filtered is kept when the other callers outvote it (its Mutect2 filters are kept in `INFO/M2_FILTER`), and a call Mutect2 never made is taken from Strelka2, VarScan2 or MuSE (named in `INFO/CONS_SOURCE`) |
-| `consensus_min_snv_callers` | `2` | callers needed for an SNV |
-| `consensus_min_indel_callers` | `2` | callers needed for an indel |
-| `consensus_filter_mode` | `tag` \| `remove` | `tag`: calls below the threshold stay in the VCF with FILTER `LOWCONSENSUS`; `remove`: they are dropped |
+| `somatic_consensus` | `true` \| `false` | `true`: vote across callers; `false`: one caller (`somatic_caller`), no vote |
+| `somatic_caller` | `mutect2` \| `strelka2` \| `muse` \| `varscan` | `somatic_consensus: false` only. `mutect2` gives its own filtered VCF; another caller's somatic PASS calls are written in one VCF (normal, tumour; `GT:AD:AF:DP`), `<S>_single_<caller>.vcf.gz`, without Mutect2's contamination, orientation-bias or panel-of-normals filtering. `muse` gives SNVs only; `varscan` alone has a high false-positive rate |
+| `consensus_backbone` | `mutect2` \| `union` | `mutect2`: only Mutect2 PASS calls are voted on. `union`: every caller's calls are voted on, Mutect2 as one vote; a call Mutect2 filtered is kept when the others outvote it (its Mutect2 filters in `INFO/M2_FILTER`), and a call Mutect2 never made is taken from Strelka2, VarScan2 or MuSE (`INFO/CONS_SOURCE`) |
+| `use_mutect2` | `true` \| `false` | Mutect2 votes in the consensus. `false`: a vote among Strelka2, MuSE and VarScan2 only, so set `consensus_backbone: union` (the `mutect2` backbone votes on Mutect2's calls) and turn on at least two of them. For a single caller use `somatic_consensus: false` and `somatic_caller` instead |
+| `use_strelka2`, `use_muse`, `use_varscan` | `true` | Strelka2, MuSE (needs `dbsnp`) and VarScan2 vote; with Mutect2 at least one must be on |
+| `consensus_min_snv_callers` | `2` | callers needed for an SNV (≥ 2; lowered to the number of callers that ran). `1` only with `consensus_backbone: mutect2`: every Mutect2 PASS call is kept, with its support in `INFO/NCALLERS` (the sensitive preset) |
+| `consensus_min_indel_callers` | `2` | callers needed for an indel; same rules |
+| `consensus_filter_mode` | `tag` \| `remove` | `tag`: calls below the threshold stay with FILTER `LOWCONSENSUS`; `remove`: they are dropped |
 | `muse_exclude_tier` | `Tier5` | MuSE tier not counted as a vote |
+
+Invalid combinations (a threshold below 2, or below 1 with the Mutect2 backbone; Mutect2 with no other caller; `use_mutect2: false` with the Mutect2 backbone or
+fewer than two other callers) stop the run at start-up. Pairs that include MuSE vote on indels with one caller only;
+Strelka2 + VarScan2 avoids this.
 
 A Mutect2 multi-nucleotide variant is kept as one record so that it is annotated at the codon level; another caller
 counts as a vote for it only when it reports every base change of that variant. `INFO/CALLERS` and `INFO/NCALLERS` list
@@ -713,7 +729,7 @@ optional steps appear only when the step runs.
 |   |   |-- snv/muse/                  <S>.MuSE.vcf.gz, <S>_muse.af.vcf.gz
 |   |   |-- snv/varscan/               <S>_varscan_snv.vcf.gz, <S>_varscan_indel.vcf.gz (+ .af.vcf.gz)
 |   |   |-- snv/callers_consensus/     <S>_consensus.vcf.gz, <S>_consensus_stats.txt, <S>_filtered.vcf.gz (final call set),
-|   |   |                              <S>_filter_stats.txt
+|   |   |                              <S>_filter_stats.txt (<S>_single_<caller>.vcf.gz/_stats.txt: one caller, not Mutect2)
 |   |   |-- sv/manta/                  <S>_manta_somaticSV.vcf.gz, <S>_manta_candidateSmallIndels.vcf.gz
 |   |   |-- cnv/cnvkit/                <S>.cnr, <S>.cns, <S>-call.cns
 |   |   |-- cnv/sequenza/              <S>_segments.txt, _mutations.txt, _confints_CP.txt, _alternative_solutions.txt,
@@ -755,8 +771,7 @@ optional steps appear only when the step runs.
 ```
 
 The deduplicated BAMs are kept in the work directory and are not copied to `outdir`; set `make_cram: true` to archive
-them as CRAM (with `bqsr: true` the recalibrated BAMs are published in `04_bqsr/`). With `germline_on_normals: true` the
-normals' germline results are written in the `somatic/` folders under the normal's sample ID.
+them as CRAM (with `bqsr: true` the recalibrated BAMs are published in `04_bqsr/`).
 
 ---
 
@@ -771,7 +786,7 @@ normals' germline results are written in the `somatic/` folders under the normal
 | `command not found` (or `Rscript`/`awk` cannot open) for a `bin/` script such as `classify_variants.sh` | `nextflow/bin/` missing, scripts not executable (copied without permissions), or the pipeline folder not visible inside Singularity | Use `git clone` (keeps permissions) or `chmod +x nextflow/bin/*`; keep the pipeline under a path in `bind_paths` |
 | `Unknown configuration profile: local` | `conf/` folder missing next to `nextflow.config` | Copy `conf/` from the release into `nextflow/` |
 | Params ignored | Values in a `-c` config, or `${HOME}` in the params file | Put them in the params YAML with absolute paths |
-| `Parameters changed since the run being resumed` | `-resume` after editing the params file | New `work_root`, or run without `-resume`; see Running PAPIO |
+| `Parameters changed since the run being resumed` (warning) | `-resume` after editing the params file | Steps already finished keep their earlier results; to recompute them use a new `work_root`; see Running PAPIO |
 | `SEQUENZA ... Error is ignored` in the log; report shows `(no Sequenza output)` | Sequenza's model fit failed (too few heterozygous SNPs: very low purity or small panel; or no segment reaches `sequenza_segment_filter`, 3 Mb by default) | Expected for such samples; CNVkit calls copy number without purity. For a small targeted panel, lower `sequenza_segment_filter` (e.g. 500000). Check purity and coverage if it happens on a normal exome |
 | Germline recall far below 0.9 | `germline_scatter_intervals` from another capture kit | Use the shards built for the sample's kit (Appendix A, step 4.3) |
 
@@ -797,7 +812,7 @@ BCF="$SX $E/bwa_samtools_fastp_fgbio_bcftools.sif"
 GATK="$SX $E/gatk.sif"
 mkdir -p $U $R/{genome/bwa_mem2,gatk,somalier,clinvar,gnomad,annotation,vep_cache,vep_plugins,cosmic,annotsv} \
          $R/{sequenza,msi,capture,gencode,star,rna_qc,ctat,arriba,fusion,fusioncatcher} \
-         $R/{trust4,telescope,refphi,truth} $E
+         $R/{trust4,telescope,truth} $E
 ```
 
 The folders and file names are those of `nextflow/setup.sh --full`, so the params files in `nextflow/params/` and the
@@ -813,7 +828,7 @@ references/
 |-- sequenza/  msi/
 |-- capture/<KIT>/          <KIT>_targets.bed, <KIT>_baits.bed, their .interval_list, <KIT>_targets_pad100.bed.gz,
 |                           <KIT>_scatter_24_pad100/, <KIT>_scatter_150_pad100/, gcnv/; optional <KIT>_cnvkit_pon.cnn, <KIT>_inhouse_pon.vcf.gz
-|-- gencode/  star/  rna_qc/  ctat/  arriba/  fusion/  fusioncatcher/  trust4/  telescope/  refphi/
+|-- gencode/  star/  rna_qc/  ctat/  arriba/  fusion/  fusioncatcher/  trust4/  telescope/
 `-- truth/                  benchmark truth sets (Appendix B)
 ```
 
@@ -1512,11 +1527,6 @@ curl -fsSL --retry 2 https://raw.githubusercontent.com/liulab-dfci/TRUST4/master
 curl -fsSL --retry 2 https://media.githubusercontent.com/media/mlbendall/telescope_annotation_db/master/builds/HERV_rmsk.hg38.v2/transcripts.gtf -o $R/telescope/HERV_rmsk.hg38.v2.gtf
 ```
 
-#### 8.10 refPhi annotation [Download]
-
-```bash
-curl -fsSL --retry 2 https://raw.githubusercontent.com/humengying0907/InstaPrismSourceCode/main/refPhi/RCC_refPhi.RDS -o $R/refphi/RCC_refPhi.RDS
-```
 ---
 
 ## Appendix B. Demonstration data and benchmarking

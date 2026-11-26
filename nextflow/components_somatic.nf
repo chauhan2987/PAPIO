@@ -2,7 +2,7 @@
 nextflow.enable.dsl = 2
 
 // Shared JVM-options helper (single source of truth in utils).
-include { gatkJavaOpts; pubDir } from './utils'
+include { gatkJavaOpts; pubDir; somaticCallSet } from './utils'
 
 // ============================================================
 //  components_somatic.nf  -  Somatic (tumor-normal) process definitions
@@ -558,7 +558,8 @@ process MERGE_MUTECT2 {
 
 
 // ============================================================
-//  STAGE 5 variant_calling: ENSEMBLE_CONSENSUS - caller consensus (Mutect2-anchored or N-of-M)
+//  STAGE 5 variant_calling: ENSEMBLE_CONSENSUS - caller consensus (Mutect2-anchored or N-of-M),
+//  or one non-Mutect2 caller's calls in the same layout (somatic_consensus: false)
 // ============================================================
 
 process ENSEMBLE_CONSENSUS {
@@ -581,24 +582,25 @@ process ENSEMBLE_CONSENSUS {
 
     output:
     tuple val(meta),
-          path("${meta.sample_id}_consensus.vcf.gz"),
-          path("${meta.sample_id}_consensus.vcf.gz.tbi"), emit: vcf
-    path  "${meta.sample_id}_consensus_stats.txt",        emit: stats
+          path("${meta.sample_id}_${somaticCallSet()}.vcf.gz"),
+          path("${meta.sample_id}_${somaticCallSet()}.vcf.gz.tbi"), emit: vcf
+    path  "${meta.sample_id}_${somaticCallSet()}_stats.txt",        emit: stats
 
     script:
-    def min_snv      = params.consensus_min_snv_callers   ?: 2
-    def min_indel    = params.consensus_min_indel_callers ?: 2
+    def single       = !params.somatic_consensus                        // one non-Mutect2 caller: format only, no vote
+    def min_snv      = single ? 1 : params.consensus_min_snv_callers
+    def min_indel    = single ? 1 : params.consensus_min_indel_callers
     def muse_exclude = params.muse_exclude_tier           ?: 'Tier5'
     def filter_mode  = params.consensus_filter_mode       ?: 'tag'      // 'tag' | 'remove'
-    def backbone     = params.consensus_backbone          ?: 'mutect2'  // 'mutect2' | 'union'
+    def backbone     = single ? 'union' : params.consensus_backbone     // 'mutect2' | 'union'
     """
     ensemble_consensus.sh --sample ${meta.sample_id} --normal ${meta.normal_id} --fasta ${ref_fasta} \\
-        --mutect2 ${mutect2_vcf} \\
+        ${mutect2_vcf ? "--mutect2 ${mutect2_vcf}" : ''} \\
         ${strelka_snv   ? "--strelka-snv ${strelka_snv}"     : ''} ${strelka_indel ? "--strelka-indel ${strelka_indel}" : ''} \\
         ${muse_vcf      ? "--muse ${muse_vcf}"               : ''} \\
         ${varscan_snv   ? "--varscan-snv ${varscan_snv}"     : ''} ${varscan_indel ? "--varscan-indel ${varscan_indel}" : ''} \\
         --min-snv ${min_snv} --min-indel ${min_indel} --muse-exclude ${muse_exclude} \\
-        --filter-mode ${filter_mode} --backbone ${backbone}
+        --filter-mode ${filter_mode} --backbone ${backbone} --prefix ${meta.sample_id}_${somaticCallSet()}
     """
 }
 

@@ -9,7 +9,7 @@ nextflow.enable.dsl = 2
 //  ------------------- stage 0 -------------------------------
 //  ------------------------ utils ----------------------------
 include { GENERATE_META_INFO          } from './utils'
-include { stageRankMap; stageRuns; naturalCompare } from './utils'
+include { stageRankMap; stageRuns; naturalCompare; somaticCallerOn } from './utils'
 
 //  ---------------- components_common ------------------------
 include { MANIFEST_ROW                } from './components_common'
@@ -105,7 +105,6 @@ include { SEQUENZA_GENE_LOH           } from './components_somatic'
 //  ------------------- stage 6 -------------------------------
 //  ---------------- components_common ------------------------
 include { ANNOTATE_VCF                } from './components_common'
-include { ANNOTATE_VCF as ANNOTATE_VCF_GERMLINE } from './components_common'
 include { COMPUTE_TMB                 } from './components_common'
 include { ANNOTATE_SV as ANNOTATE_SV_SOMATIC } from './components_common'
 include { ANNOTATE_SV as ANNOTATE_SV_MANTA } from './components_common'
@@ -534,10 +533,8 @@ workflow GERMLINE_BLOCK {
     // -- CNV - GATK gCNV (cohort mode; requires a minimum number of normals) --
     ch_cnv_vcf = channel.empty()
 
-    // Somatic runs call normals too (germline_on_normals); the gCNV cohort model
-    // needs >= gcnv_min_samples normals, so it is opt-in there (gcnv_in_somatic).
-    def gcnv_on = params.run_gcnv && (params.analysis == 'germline' || params.gcnv_in_somatic)
-    if (gcnv_on) {
+    // the gCNV cohort model needs >= gcnv_min_samples normals
+    if (params.run_gcnv) {
 
         // Cohort-size guard as a SIDE channel: it counts normals and aborts if the
         // cohort is too small, WITHOUT sitting between ch_germ_bam_bai and the gCNV
@@ -622,8 +619,7 @@ workflow GERMLINE_BLOCK {
         ch_cnv_vcf = GATK_GCNV_POSTPROCESS.out.cnv_vcf
 
     } else {
-        log.info "Germline gCNV skipped (run_gcnv=${params.run_gcnv}, analysis=${params.analysis}, " +
-                 "gcnv_in_somatic=${params.gcnv_in_somatic}). gCNV needs >=${params.gcnv_min_samples} normals."
+        log.info "Germline gCNV skipped (run_gcnv = false). gCNV needs >=${params.gcnv_min_samples} normals."
     }
 
     emit:
@@ -698,15 +694,14 @@ workflow SOMATIC_BLOCK {
         ch_call_regions_gz, ch_call_regions_tbi
     )
 
-    // Strelka2 only runs when ensemble calling is enabled. With
-    // use_strelka2_in_consensus=false the final SNV VCF comes from Mutect2 alone,
-    // so Strelka2 is skipped entirely (avoids running it needlessly).
+    // A caller runs only when its output is used: with somatic_consensus the use_* switches,
+    // without it only somatic_caller (somaticCallerOn in utils.nf).
 
     // Join Manta indel candidates to each pair BY sample_id (scalar key - robust;
     // joining on the whole meta Map can silently fail if object identity differs).
     // All STRELKA2 inputs are then derived from this ONE joined channel, so the
     // BAMs and the matching indel candidates can never cross-pair between samples.
-    if (params.use_strelka2_in_consensus) {
+    if (somaticCallerOn('strelka2')) {
         ch_strelka_joined = ch_paired
             .map { meta, t_bam, t_bai, n_bam, n_bai -> tuple(meta.sample_id, meta, t_bam, t_bai, n_bam, n_bai) }
             .join(
@@ -731,7 +726,7 @@ workflow SOMATIC_BLOCK {
         TAG_STRELKA_AF(STRELKA2.out.vcf)
     }
     // MuSE - independent SNV caller, runs in parallel with Mutect2/Strelka2.
-    if (params.use_muse_in_consensus) {
+    if (somaticCallerOn('muse')) {
         MUSE_CALL(ch_paired, ch_ref_fasta, ch_ref_fai)
         MUSE_SUMP(MUSE_CALL.out.call_output, ch_dbsnp, ch_dbsnp_tbi)
         // compute AF from AD (which MuSE reliably has), defensively. If AD is (ref,alt), AF = alt/(ref+alt)
@@ -739,7 +734,7 @@ workflow SOMATIC_BLOCK {
     }
     // VarScan2 - deep-data-safe indel caller (pileup-based, no realigner to
     // crash on high-depth data). Runs on the paired BAMs directly, like MuSE.
-    if (params.use_varscan_in_consensus) {
+    if (somaticCallerOn('varscan')) {
         // WGS: scatter by shard; WES: one task on the capture BED (unchanged behaviour).
         ch_vs_shards = (params.assay == 'wgs') ? ch_scatter_intervals : channel.of(tuple('all', []))
         VARSCAN(
@@ -759,109 +754,117 @@ workflow SOMATIC_BLOCK {
         TAG_VARSCAN_AF(VARSCAN_MERGE.out.vcf, ch_ref_fasta, ch_ref_fai)
     }
 
-    ch_mutect_input = ch_paired.combine(ch_scatter_intervals)
-    MUTECT2(
-        ch_mutect_input,
-        ch_ref_fasta, ch_ref_fai, ch_ref_dict,
-        ch_germline_resource, ch_germline_resource_tbi,
-        ch_panel_of_normals, ch_panel_of_normals_tbi
-    )
+    // Mutect2 and its contamination / orientation-bias steps (skipped with use_mutect2: false
+    // in a union consensus, or with somatic_consensus: false and another somatic_caller).
+    ch_contam_report = channel.empty()
+    if (somaticCallerOn('mutect2')) {
+        ch_mutect_input = ch_paired.combine(ch_scatter_intervals)
+        MUTECT2(
+            ch_mutect_input,
+            ch_ref_fasta, ch_ref_fai, ch_ref_dict,
+            ch_germline_resource, ch_germline_resource_tbi,
+            ch_panel_of_normals, ch_panel_of_normals_tbi
+        )
 
-    // GROUPING: key on scalar sample_id. Shard lists sorted by name so the gather
-    // task's input hash does not depend on shard completion order (-resume).
-    ch_mutect_chunks = MUTECT2.out.vcf_chunk
-        .map { meta, _iname, vcf, tbi, stats -> tuple(meta.sample_id, meta, vcf, tbi, stats) }
-        .groupTuple(by: 0)
-        .map { _sid, metas, vcfs, tbis, stats ->
-            tuple(metas[0], vcfs.sort { v -> v.name }, tbis.sort { t -> t.name }, stats.sort { s -> s.name })
+        // GROUPING: key on scalar sample_id. Shard lists sorted by name so the gather
+        // task's input hash does not depend on shard completion order (-resume).
+        ch_mutect_chunks = MUTECT2.out.vcf_chunk
+            .map { meta, _iname, vcf, tbi, stats -> tuple(meta.sample_id, meta, vcf, tbi, stats) }
+            .groupTuple(by: 0)
+            .map { _sid, metas, vcfs, tbis, stats ->
+                tuple(metas[0], vcfs.sort { v -> v.name }, tbis.sort { t -> t.name }, stats.sort { s -> s.name })
+            }
+
+        // -- Orientation-bias model (FFPE) - gather per-sample f1r2, learn priors -
+        if (params.orientation_bias) {
+            ch_orient_input = MUTECT2.out.f1r2
+                .map { meta, _iname, f -> tuple(meta.sample_id, meta, f) }
+                .groupTuple(by: 0)
+                .map { _sid, metas, fs -> tuple(metas[0], fs.sort { f -> f.name }) }
+            LEARN_READ_ORIENTATION_MODEL(ch_orient_input)
+            ch_ob_priors = LEARN_READ_ORIENTATION_MODEL.out.priors.map { meta, p -> tuple(meta.sample_id, p) }
+        } else {
+            ch_ob_priors = channel.empty()
         }
 
-    // -- Orientation-bias model (FFPE) - gather per-sample f1r2, learn priors -
-    if (params.orientation_bias) {
-        ch_orient_input = MUTECT2.out.f1r2
-            .map { meta, _iname, f -> tuple(meta.sample_id, meta, f) }
-            .groupTuple(by: 0)
-            .map { _sid, metas, fs -> tuple(metas[0], fs.sort { f -> f.name }) }
-        LEARN_READ_ORIENTATION_MODEL(ch_orient_input)
-        ch_ob_priors = LEARN_READ_ORIENTATION_MODEL.out.priors.map { meta, p -> tuple(meta.sample_id, p) }
-    } else {
-        ch_ob_priors = channel.empty()
-    }
+        // -- Contamination - pileups (tumor + normal) - CalculateContamination --
+        //   Runs only if a pileup-variants resource is provided; else skipped.
+        if (params.pileup_variants) {
+            GETPILEUPSUMMARIES(
+                ch_paired.map { meta, t_bam, t_bai, _nb, _ni -> tuple(meta, 'tumor', t_bam, t_bai) }
+                    .mix(ch_paired.map { meta, _tb, _ti, n_bam, n_bai -> tuple(meta, 'normal', n_bam, n_bai) }),
+                ch_ref_fasta, ch_ref_fai, ch_ref_dict,
+                ch_pileup_variants, ch_pileup_variants_tbi,
+                ch_interval_bed
+            )
+            ch_pile_t = GETPILEUPSUMMARIES.out.table
+                .filter { _m, label, _t -> label == 'tumor' }
+                .map    { meta, _l, tbl -> tuple(meta.sample_id, meta, tbl) }
+            ch_pile_n = GETPILEUPSUMMARIES.out.table
+                .filter { _m, label, _t -> label == 'normal' }
+                .map    { meta, _l, tbl -> tuple(meta.sample_id, tbl) }
 
-    // -- Contamination - pileups (tumor + normal) - CalculateContamination --
-    //   Runs only if a pileup-variants resource is provided; else skipped.
-    if (params.pileup_variants) {
-        GETPILEUPSUMMARIES(
-            ch_paired.map { meta, t_bam, t_bai, _nb, _ni -> tuple(meta, 'tumor', t_bam, t_bai) }
-                .mix(ch_paired.map { meta, _tb, _ti, n_bam, n_bai -> tuple(meta, 'normal', n_bam, n_bai) }),
+            ch_contam_input = ch_pile_t.join(ch_pile_n, by: 0)
+                .map { _sid, meta, t_tbl, n_tbl -> tuple(meta, t_tbl, n_tbl) }
+
+            CALCULATE_CONTAMINATION(ch_contam_input)
+
+            ch_contam = CALCULATE_CONTAMINATION.out.contamination
+                .map { meta, c, seg -> tuple(meta.sample_id, c, seg) }
+            ch_contam_report = CALCULATE_CONTAMINATION.out.contamination
+                .map { meta, c, _seg -> tuple(meta.sample_id, c) }
+        } else {
+            ch_contam = channel.empty()
+            ch_contam_report = channel.empty()
+        }
+
+        // -- Join chunks + (optional) contamination + (optional) ob-priors -------
+        //   feature on: inner join on the optional channel; feature off: [] placeholders.
+        //   c/seg/p come from one channel, so samples cannot cross-pair.
+        ch_merge_keyed = ch_mutect_chunks.map { meta, v, t, s -> tuple(meta.sample_id, meta, v, t, s) }
+
+        ch_with_contam = params.pileup_variants
+            ? ch_merge_keyed.join(ch_contam, by: 0)
+                .map { sid, meta, v, t, s, c, seg -> tuple(sid, meta, v, t, s, c, seg) }
+            : ch_merge_keyed.map { sid, meta, v, t, s -> tuple(sid, meta, v, t, s, [], []) }
+
+        ch_with_ob = params.orientation_bias
+            ? ch_with_contam.join(ch_ob_priors, by: 0)
+                .map { _sid, meta, v, t, s, c, seg, p -> tuple(meta, v, t, s, c, seg, p) }
+            : ch_with_contam.map { _sid, meta, v, t, s, c, seg -> tuple(meta, v, t, s, c, seg, []) }
+
+        MERGE_MUTECT2(
+            ch_with_ob.map { m, v, t, s, _c, _seg, _p -> tuple(m, v, t, s) },
             ch_ref_fasta, ch_ref_fai, ch_ref_dict,
-            ch_pileup_variants, ch_pileup_variants_tbi,
-            ch_interval_bed
+            ch_with_ob.map { _m, _v, _t, _s, c,  _seg, _p -> c   },
+            ch_with_ob.map { _m, _v, _t, _s, _c, seg,  _p -> seg },
+            ch_with_ob.map { _m, _v, _t, _s, _c, _seg, p  -> p   }
         )
-        ch_pile_t = GETPILEUPSUMMARIES.out.table
-            .filter { _m, label, _t -> label == 'tumor' }
-            .map    { meta, _l, tbl -> tuple(meta.sample_id, meta, tbl) }
-        ch_pile_n = GETPILEUPSUMMARIES.out.table
-            .filter { _m, label, _t -> label == 'normal' }
-            .map    { meta, _l, tbl -> tuple(meta.sample_id, tbl) }
-
-        ch_contam_input = ch_pile_t.join(ch_pile_n, by: 0)
-            .map { _sid, meta, t_tbl, n_tbl -> tuple(meta, t_tbl, n_tbl) }
-
-        CALCULATE_CONTAMINATION(ch_contam_input)
-
-        ch_contam = CALCULATE_CONTAMINATION.out.contamination
-            .map { meta, c, seg -> tuple(meta.sample_id, c, seg) }
-        ch_contam_report = CALCULATE_CONTAMINATION.out.contamination
-            .map { meta, c, _seg -> tuple(meta.sample_id, c) }
-    } else {
-        ch_contam = channel.empty()
-        ch_contam_report = channel.empty()
-    }
-
-    // -- Join chunks + (optional) contamination + (optional) ob-priors -------
-    //   feature on: inner join on the optional channel; feature off: [] placeholders.
-    //   c/seg/p come from one channel, so samples cannot cross-pair.
-    ch_merge_keyed = ch_mutect_chunks.map { meta, v, t, s -> tuple(meta.sample_id, meta, v, t, s) }
-
-    ch_with_contam = params.pileup_variants
-        ? ch_merge_keyed.join(ch_contam, by: 0)
-            .map { sid, meta, v, t, s, c, seg -> tuple(sid, meta, v, t, s, c, seg) }
-        : ch_merge_keyed.map { sid, meta, v, t, s -> tuple(sid, meta, v, t, s, [], []) }
-
-    ch_with_ob = params.orientation_bias
-        ? ch_with_contam.join(ch_ob_priors, by: 0)
-            .map { _sid, meta, v, t, s, c, seg, p -> tuple(meta, v, t, s, c, seg, p) }
-        : ch_with_contam.map { _sid, meta, v, t, s, c, seg -> tuple(meta, v, t, s, c, seg, []) }
-
-    MERGE_MUTECT2(
-        ch_with_ob.map { m, v, t, s, _c, _seg, _p -> tuple(m, v, t, s) },
-        ch_ref_fasta, ch_ref_fai, ch_ref_dict,
-        ch_with_ob.map { _m, _v, _t, _s, c,  _seg, _p -> c   },
-        ch_with_ob.map { _m, _v, _t, _s, _c, seg,  _p -> seg },
-        ch_with_ob.map { _m, _v, _t, _s, _c, _seg, p  -> p   }
-    )
+    }   // Mutect2
 
 // -- Somatic SNV/indel final call set ----------------------------------
-    if (params.somatic_consensus) {
+    // ENSEMBLE_CONSENSUS also formats a single non-Mutect2 caller (somatic_consensus: false):
+    // its somatic PASS calls in one VCF (normal, tumour; GT:AD:AF:DP), no vote.
+    if (params.somatic_consensus || !somaticCallerOn('mutect2')) {
         // Variant-type-aware N-of-M consensus across enabled callers.
-        // Mutect2 is the always-on backbone; MuSE/Strelka2 optional per param.
+        // Callers per somaticCallerOn(): Mutect2 and the others each optional (use_*).
         // Each caller channel is keyed by sample_id; disabled or sample-missing
         // callers are padded with [] so no sample is dropped.
 
 
-        ch_cons_m2 = MERGE_MUTECT2.out.vcf
-            .map { meta, v, t -> tuple(meta.sample_id, meta, v, t) }
+        ch_cons_m2 = somaticCallerOn('mutect2')
+            ? MERGE_MUTECT2.out.vcf.map { meta, v, t -> tuple(meta.sample_id, meta, v, t) }
+            : ch_paired.map { meta, _tb, _ti, _nb, _ni -> tuple(meta.sample_id, meta, [], []) }
 
-        ch_cons_strelka = (params.use_strelka2_in_consensus)
+        ch_cons_strelka = somaticCallerOn('strelka2')
             ? TAG_STRELKA_AF.out.vcf.map { meta, s, st, i, it -> tuple(meta.sample_id, s, st, i, it) }
             : channel.empty()
 
-        ch_cons_muse = (params.use_muse_in_consensus)
+        ch_cons_muse = somaticCallerOn('muse')
             ? TAG_MUSE_AF.out.vcf.map { meta, v, t -> tuple(meta.sample_id, v, t) }
             : channel.empty()
 
-        ch_cons_varscan = (params.use_varscan_in_consensus)
+        ch_cons_varscan = somaticCallerOn('varscan')
             ? TAG_VARSCAN_AF.out.vcf.map { meta, s, st, i, it -> tuple(meta.sample_id, s, st, i, it) }
             : channel.empty()
 
@@ -1532,18 +1535,12 @@ workflow DNA_WORKFLOW {
     }
 
     // -- STAGE 5 variant_calling ------------------------------------
-    // Somatic runs also call the matched normals' germline (FH, SMARCB1, VHL,
-    // FLCN, BAP1, TSC1/2, SDHx, HBB ...) unless germline_on_normals=false.
-    def germline_on_normals = (params.analysis == 'somatic' && params.germline_on_normals)
-    ch_germline_vcf = channel.empty()
-
     if (stageRuns('variant_calling')) {
         if (params.evidence_bed) {
             EVIDENCE_BAM(ch_active_bam, ch_evidence_bed, ch_ref_fasta, ch_ref_fai)
         }
 
-        if (params.analysis == 'germline' || germline_on_normals) {
-
+        if (params.analysis == 'germline') {
             GERMLINE_BLOCK(
                 (params.germline_caller == 'deepvariant') ? ch_pre_bqsr_bam : ch_active_bam,
                 ch_ref_fasta, ch_ref_fai, ch_ref_dict,
@@ -1563,9 +1560,6 @@ workflow DNA_WORKFLOW {
                 ch_roh_af_file,
                 ch_roh_af_file_tbi
             )
-        }
-
-        if (params.analysis == 'germline') {
             ch_active_vcf = GERMLINE_BLOCK.out.snv_vcf
 
         } else if (params.analysis == 'somatic') {
@@ -1585,7 +1579,6 @@ workflow DNA_WORKFLOW {
 
             )
             ch_active_vcf = SOMATIC_BLOCK.out.snv_vcf
-            if (germline_on_normals) ch_germline_vcf = GERMLINE_BLOCK.out.snv_vcf
 
         } else if (params.analysis == 'tumor_only') {
             error "analysis = tumor_only is not implemented; use analysis = somatic with a matched normal"
@@ -1606,19 +1599,6 @@ workflow DNA_WORKFLOW {
             ch_cosmic, ch_cosmic_tbi,
             ch_gnomad_faf, ch_gnomad_faf_tbi
         )
-
-        // Normals' germline calls from a somatic run (same VEP config, no COSMIC).
-        if (germline_on_normals && stageRuns('variant_calling')) {
-            ANNOTATE_VCF_GERMLINE(
-                ch_germline_vcf,
-                ch_vep_cache_dir,
-                ch_ref_fasta, ch_ref_fai,
-                ch_vep_plugins_dir,
-                ch_clinvar, ch_clinvar_tbi,
-                channel.value([]), channel.value([]),
-                ch_gnomad_faf, ch_gnomad_faf_tbi
-            )
-        }
 
         // TMB from the VEP-annotated calls (needs consequence annotations).
         if (params.compute_tmb && params.analysis == 'somatic') {
@@ -1661,11 +1641,6 @@ workflow DNA_WORKFLOW {
         ch_annot_for_classify = cold_start
             ? ch_active_vcf
             : ANNOTATE_VCF.out.annotated_vcf.map { meta, vcf, tbi, _html -> tuple(meta, vcf, tbi) }
-        // Somatic runs with germline_on_normals: the normals' germline calls are classified
-        // (germline rules) and converted to MAF too.
-        if (germline_on_normals && !cold_start && stageRuns('annotation') && calls_this_run)
-            ch_annot_for_classify = ch_annot_for_classify.mix(
-                ANNOTATE_VCF_GERMLINE.out.annotated_vcf.map { meta, vcf, tbi, _html -> tuple(meta, vcf, tbi) })
 
         if (params.classify_variants) {
             CLASSIFY_VARIANTS(ch_annot_for_classify, toOptionalFileChannel(params.cosmic_cgc_tsv),
@@ -1701,16 +1676,11 @@ workflow DNA_WORKFLOW {
         //   Needs SV/CNV/ROH produced this run, so it is gated on !cold_start
         //   exactly like the somatic report. SNV source is the VEP-annotated
         //   VCF (for ClinVar/CLIN_SIG in the report's SNV section).
-        def germ_report_mode = (params.analysis == 'germline' || germline_on_normals)
         // AnnotSV is optional: without it only the SV/CNV sections are empty.
-        def can_germline_report = calls_this_run && params.consolidate_germline_reports && germ_report_mode
+        def can_germline_report = calls_this_run && params.consolidate_germline_reports && params.analysis == 'germline'
         if (can_germline_report) {
-            ch_germ_snv_annot = (params.analysis == 'germline'
-                    ? ANNOTATE_VCF.out.annotated_vcf
-                    : ANNOTATE_VCF_GERMLINE.out.annotated_vcf)
-                .map { meta, vcf, tbi, _html -> tuple(meta, vcf, tbi) }
             GERMLINE_REPORT_BLOCK(
-                ch_germ_snv_annot,
+                ANNOTATE_VCF.out.annotated_vcf.map { meta, vcf, tbi, _html -> tuple(meta, vcf, tbi) },
                 GERMLINE_BLOCK.out.sv_vcf,
                 GERMLINE_BLOCK.out.cnv_vcf,
                 GERMLINE_BLOCK.out.roh,
@@ -1718,7 +1688,7 @@ workflow DNA_WORKFLOW {
                 toOptionalFileChannel(params.cosmic_cgc_tsv),
                 toOptionalFileChannel(params.germline_report_genes)
             )
-        } else if (params.consolidate_germline_reports && germ_report_mode && !calls_this_run) {
+        } else if (params.consolidate_germline_reports && params.analysis == 'germline' && !calls_this_run) {
             log.info "Germline report skipped on cold-start; use -resume for the consolidated report."
         }
     }

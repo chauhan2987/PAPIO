@@ -20,7 +20,7 @@ include { RNA_WORKFLOW } from './workflows_rna'   // RNA fusion arm
 // Shared constants live in utils (single source of truth) so validation
 // here and execution in DNA_WORKFLOW can never disagree about stage order.
 include { stageRankMap; validStages; validAssays;
-          validAnalyses; validCallers; validDedupModes; rnaStrandedness } from './utils'
+          validAnalyses; validCallers; validDedupModes; rnaStrandedness; somaticCaller; somaticCallerOn } from './utils'
 
 
 // ============================================================
@@ -94,15 +94,21 @@ def validateParams() {
         somatic_filter_mode  : ['tag', 'remove'],
         consensus_filter_mode: ['tag', 'remove'],
         consensus_backbone   : ['mutect2', 'union'],
+        somatic_caller       : ['mutect2', 'strelka2', 'muse', 'varscan'],
         joint_genotyper      : ['classic', 'gnarly'],
         nv_tensor_type       : ['reference', 'read_tensor'],
         manifest_checksum    : ['none', 'header', 'full'],
         rna_strandedness     : ['auto', 'yes', 'no', 'unstranded', 'forward', 'reverse', 'fr', 'rf',
                                 'fr-firststrand', 'fr-secondstrand'],
     ]
+    // removed: germline calling on a somatic run's normals is the germline arm (-resume reuses the alignment)
+    ['germline_on_normals', 'gcnv_in_somatic'].each { k ->
+        if (params.containsKey(k))
+            error "ERROR: params.${k} was removed - run analysis: germline on the normals (with -resume on the somatic work_root the alignment is reused)"
+    }
     enumParams.each { k, allowed ->
-        def v = (k == 'rna_strandedness') ? rnaStrandedness() : params[k]
-        if (v != null && !(v.toString().toLowerCase() in allowed))
+        def v = (k == 'rna_strandedness') ? rnaStrandedness() : params[k]     // only strandedness is case-normalised
+        if (v != null && !(v.toString() in allowed))
             error "ERROR: Invalid params.${k} '${v}'. One of: ${allowed.join(', ')}"
     }
 
@@ -267,32 +273,60 @@ def validateParams() {
                     "when params.run_gcnv = true (germline CNV cohort model)")
         }
 
-        if (params.analysis == 'somatic' && params.germline_on_normals) {
-            if (!validCallers().contains(params.germline_caller))
-                error "ERROR: Invalid params.germline_caller '${params.germline_caller}'. One of: ${validCallers().join(', ')}"
-            if (params.germline_caller == 'haplotypecaller')
-                requireParams(['dbsnp'] + (params.germline_filter in ['nv', 'vqsr'] ? ['hapmap', 'omni', 'thousandg_snps', 'mills'] : []),
-                    "when germline_on_normals = true with HaplotypeCaller (dbSNP + filtering resources)")
-            if (params.run_gcnv && params.gcnv_in_somatic)
-                requireParams(['preprocessed_intervals', 'contig_ploidy_priors', 'gcnv_scatter_intervals'],
-                    "when gcnv_in_somatic = true (germline CNV cohort model on normals)")
-        }
 
         if (params.analysis == 'somatic') {
-            requireParams(['germline_resource'], "for somatic calling (Mutect2 gnomAD germline resource)")
-            if (params.use_muse_in_consensus)
-                requireParams(['dbsnp'], "for MuSE sump (-D dbSNP) when use_muse_in_consensus = true")
-            if (!(params.consensus_backbone in ['mutect2', 'union']))
-                error "params.consensus_backbone must be 'mutect2' or 'union' (got '${params.consensus_backbone}')"
-            warnParams(['panel_of_normals'], "Mutect2 will run without a panel-of-normals (more false positives)")
+            // -- somatic callers: consensus vote (somatic_consensus) or one caller (somatic_caller) --
+            ['strelka2', 'muse', 'varscan'].each { c ->
+                if (params.containsKey("use_${c}_in_consensus".toString()))
+                    error "ERROR: params.use_${c}_in_consensus was renamed use_${c}"
+            }
+            if (params.somatic_consensus) {
+                // a vote needs >= 2 voters and a threshold >= 2; 1 only on the Mutect2 backbone
+                // (every Mutect2 PASS call kept, annotated with its support: the sensitive preset)
+                def min_thr = (params.consensus_backbone == 'mutect2') ? 1 : 2
+                ['consensus_min_snv_callers', 'consensus_min_indel_callers'].each { k ->
+                    def v = params[k]
+                    if (!(v instanceof Integer) || v < min_thr)
+                        error "ERROR: ${k} must be an integer >= ${min_thr} with consensus_backbone: ${params.consensus_backbone} (got '${v}'). For one caller set somatic_consensus: false and somatic_caller."
+                }
+                def others = [params.use_strelka2, params.use_muse, params.use_varscan].count { v -> v }
+                if (params.use_mutect2) {
+                    if (others < 1)
+                        error "ERROR: somatic_consensus: true needs use_strelka2, use_muse or use_varscan besides Mutect2. For one caller set somatic_consensus: false and somatic_caller."
+                } else {
+                    if (params.consensus_backbone != 'union')
+                        error "ERROR: use_mutect2: false needs consensus_backbone: union (the Mutect2-anchored vote needs Mutect2)."
+                    if (others < 2)
+                        error "ERROR: use_mutect2: false needs at least two of use_strelka2, use_muse, use_varscan."
+                    if (!params.use_strelka2 || !params.use_varscan)
+                        log.warn "use_mutect2: false - indels are voted on by fewer than two callers (MuSE calls SNVs only)."
+                    log.warn "use_mutect2: false - no Mutect2 contamination, orientation-bias (FFPE) or panel-of-normals filtering."
+                }
+                if (somaticCaller() != 'mutect2')
+                    log.warn "somatic_caller: ${somaticCaller()} is ignored with somatic_consensus: true (the use_<caller> switches decide)."
+            } else {
+                log.info "somatic_consensus: false - final somatic calls from ${somaticCaller()} alone (use_<caller> switches ignored)."
+                if (somaticCaller() != 'mutect2')
+                    log.warn "somatic_caller: ${somaticCaller()} - no Mutect2 contamination, orientation-bias (FFPE) or panel-of-normals filtering."
+                if (somaticCaller() == 'muse')
+                    log.warn "somatic_caller: muse - MuSE calls SNVs only; no somatic indels will be reported."
+                if (somaticCaller() == 'varscan')
+                    log.warn "somatic_caller: varscan - VarScan2 alone has a high false-positive rate; prefer mutect2 or strelka2."
+            }
+            if (somaticCallerOn('mutect2')) {
+                requireParams(['germline_resource'], "for Mutect2 (gnomAD germline resource)")
+                warnParams(['panel_of_normals'], "Mutect2 will run without a panel-of-normals (more false positives)")
+                warnParams(['pileup_variants'],
+                    "contamination filtering (GetPileupSummaries/CalculateContamination) will be skipped")
+                if (params.orientation_bias)
+                    log.info "Orientation-bias filtering ENABLED (Mutect2 f1r2 - ob-priors) - recommended for FFPE."
+            }
+            if (somaticCallerOn('muse'))
+                requireParams(['dbsnp'], "for MuSE sump (-D dbSNP) when MuSE runs")
             warnParams(['cnvkit_pon'], "CNVkit will build its reference from the matched normal (no panel-of-normals)")
             if (params.containsKey('msi_cutoff'))
                 error "ERROR: params.msi_cutoff was replaced by msi_cutoff_paired_low / msi_cutoff_paired_high (paired) and msi_cutoff_tumor_only"
             warnParams(['msisensor_list'], "MSI (MSIsensor-pro) will be skipped - needs a pre-scanned microsatellite list")
-            warnParams(['pileup_variants'],
-                "contamination filtering (GetPileupSummaries/CalculateContamination) will be skipped")
-            if (params.orientation_bias)
-                log.info "Orientation-bias filtering ENABLED (Mutect2 f1r2 - ob-priors) - recommended for FFPE."
         }
 
         if (params.analysis == 'tumor_only')
@@ -405,8 +439,16 @@ def validateRnaParams(int startRank, int stopRank, String sheet) {
 // parameter used inside a process script is not part of the task hash: after a parameter
 // change, -resume reuses the old task results (verified on 26.04.1: a changed
 // consensus_backbone re-used the old consensus). Store the parameters next to the work
-// directory and refuse a resumed run whose parameters changed, unless allowed.
-// Parameters that cannot change task results are not compared.
+// directory and list the changes on a resumed run (warning by default; a stop with
+// allow_param_change_on_resume: false). Parameters that cannot change task results are not
+// compared. One snapshot per analysis (.papio_params_<analysis>.tsv): a germline run resumed
+// on a somatic work_root reuses the shared steps (alignment, QC) and lists the differences.
+def readSnapshot(f) {
+    f.text.readLines().findAll { l -> l }.collectEntries { l ->
+        def kv = l.split('\t', 2)
+        [(kv[0]): (kv.size() > 1 ? kv[1] : '')]
+    }
+}
 def checkResumeParams() {
     // start_at / stop_at only choose which stages run (extending a run with -resume is the
     // normal use); they change no task's command, so they are not treated as a change.
@@ -414,23 +456,36 @@ def checkResumeParams() {
                 'allow_param_change_on_resume', 'start_at', 'stop_at'] as Set
     def keys = params.keySet().findAll { k -> !(k in skip) && !k.startsWith('lsf_') && !k.contains('-') }.sort()
     def cur  = keys.collectEntries { k -> [(k): (params[k] == null ? 'null' : params[k].toString())] }
-    def snap = file("${params.work_root}/.papio_params.tsv")
-    if (workflow.resume && snap.exists()) {
-        def old = snap.text.readLines().findAll { l -> l }.collectEntries { l ->
-            def kv = l.split('\t', 2)
-            [(kv[0]): (kv.size() > 1 ? kv[1] : '')]
-        }
-        def changed = (old.keySet() + cur.keySet()).findAll { k -> !(k in skip) && old[k] != cur[k] }.sort()
+    def snap   = file("${params.work_root}/.papio_params_${params.analysis}.tsv")
+    def legacy = file("${params.work_root}/.papio_params.tsv")            // before per-analysis snapshots
+    def old    = snap.exists() ? readSnapshot(snap)
+               : (legacy.exists() && readSnapshot(legacy).analysis == cur.analysis) ? readSnapshot(legacy) : null
+    if (workflow.resume && old != null) {
+        // Only parameters present in both runs can have changed a cached task; one added or
+        // removed by a pipeline update did not exist for the other run (noted, not an error).
+        def changed = cur.keySet().findAll { k -> old.containsKey(k) && old[k] != cur[k] }.sort()
+        def added   = cur.keySet().findAll { k -> !old.containsKey(k) }.sort()
+        if (added)
+            log.info "Parameters new since the run being resumed (pipeline update): ${added.collect { k -> "${k}=${cur[k]}" }.join(', ')}"
         if (changed) {
             def lines = changed.collect { k -> "    ${k}: ${old[k] ?: '(unset)'} -> ${cur[k] ?: '(unset)'}" }.join('\n')
             def msg = "Parameters changed since the run being resumed:\n${lines}\n" +
-                      "  Nextflow's strict parser does not re-run cached tasks for a parameter change, so the affected\n" +
-                      "  results would be stale. Run without -resume, or with a new work_root, or set\n" +
-                      "  allow_param_change_on_resume: true if no cached task uses these parameters."
+                      "  Steps that already finished keep their earlier results (Nextflow's strict parser does not\n" +
+                      "  re-run them for a parameter change); steps not yet run use the new values. To recompute a\n" +
+                      "  finished step, use a new work_root. allow_param_change_on_resume: false stops here instead."
             if (params.allow_param_change_on_resume)
                 log.warn msg
             else
                 error "ERROR: ${msg}"
+        }
+    } else if (workflow.resume) {
+        // first run of this analysis on the work_root: shared steps of another analysis are reused
+        def others = files("${params.work_root}/.papio_params_*.tsv") + (legacy.exists() ? [legacy] : [])
+        others.findAll { f -> f.name != snap.name }.each { f ->
+            def o = readSnapshot(f)
+            def diff = cur.keySet().findAll { k -> o.containsKey(k) && o[k] != cur[k] && k != 'analysis' }.sort()
+            log.warn "Resuming on the ${o.analysis} run's work_root: its alignment and QC are reused" +
+                     (diff ? ". Check that none of these differences affects them: ${diff.join(', ')}" : ".")
         }
     }
     snap.parent.mkdirs()

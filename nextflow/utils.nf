@@ -32,6 +32,11 @@ def rnaStrandedness() {
     if (v instanceof Boolean) return v ? 'yes' : 'no'
     return (v == null || v.toString().trim() == '') ? 'auto' : v.toString().trim().toLowerCase()
 }
+// Somatic callers: with somatic_consensus a caller runs when its use_<caller> is on; without it
+// only somatic_caller runs. somaticCallSet() names the final call set: consensus | single_<caller>.
+def somaticCaller()            { (params.somatic_caller ?: 'mutect2').toString().toLowerCase() }
+def somaticCallerOn(String c)  { params.somatic_consensus ? (params["use_${c}".toString()] as boolean) : somaticCaller() == c }
+def somaticCallSet()           { params.somatic_consensus ? 'consensus' : "single_${somaticCaller()}" }
 def validDedupModes() { ['umi_consensus', 'umi_markdup', 'markdup', 'external'] }
 
 // Single stage-window predicate (ranks from the shared stageRankMap()), so

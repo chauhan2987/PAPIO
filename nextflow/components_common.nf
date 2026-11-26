@@ -1681,8 +1681,7 @@ process CLASSIFY_VARIANTS {
     def cosmic_min        = params.cosmic_recurrence_min ?: 10
     def cosmic_strong     = params.cosmic_strong_min     ?: 50
     def clinvar_min_stars = (params.clinvar_min_stars != null) ? params.clinvar_min_stars : 1   // 0 = gating off (elvis would turn 0 into 1)
-    // germline rules for normals (germline arm, or matched normals with germline_on_normals)
-    def cls_mode          = (params.analysis == 'germline' || meta.type == 'DN') ? 'germline' : 'somatic'
+    def cls_mode          = (params.analysis == 'germline') ? 'germline' : 'somatic'
     def ba1_af            = (params.germline_ba1_af != null) ? params.germline_ba1_af : 0.05
     def germ_low_vaf      = (params.germline_low_vaf != null) ? params.germline_low_vaf : 0.30
     def mosaic_min_dp     = (params.germline_mosaic_min_dp != null) ? params.germline_mosaic_min_dp : 20

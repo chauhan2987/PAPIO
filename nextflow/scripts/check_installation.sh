@@ -137,10 +137,8 @@ section "Run paths"
 ## pipeline_root = the repository root (genomics_pipeline/, holding nextflow/main.nf); only printed in
 ## the run header (the pipeline runs from main.nf's own folder). The nextflow/ folder itself is also accepted.
 PR=$(yget pipeline_root)
-[ -n "$PR" ] && [ -d "$PR" ] && PR=$(CDPATH= builtin cd "$PR" >/dev/null && builtin pwd -P)    # resolve '..' for display
-if [ -n "$PR" ] && [ -s "${PR}/nextflow/main.nf" ]; then pass "pipeline root: ${PR} (contains nextflow/main.nf)"
-elif [ -n "$PR" ] && [ -s "${PR}/main.nf" ]; then warn "pipeline root '${PR}' is the nextflow/ folder; set pipeline_root to the repository root (\${projectDir}/..)"
-else warn "pipeline root '${PR:-not set}' does not contain nextflow/main.nf (set pipeline_root to the repository root; shown in the run header only)"; fi
+if [ -n "$PR" ] && { [ -s "${PR}/nextflow/main.nf" ] || [ -s "${PR}/main.nf" ]; }; then pass "pipeline_root (nextflow/main.nf found)"
+else warn "pipeline_root: no nextflow/main.nf in '${PR:-not set}' (should be the repository root; shown in the run header only)"; fi
 for key in work_root outdir; do
     p=$(yget "$key")
     if [ -z "$p" ]; then fail "$key not set"; continue; fi
