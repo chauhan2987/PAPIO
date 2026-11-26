@@ -253,6 +253,7 @@ assay:                  wes             # wes | rna
 analysis:               somatic         # somatic | germline | rna_fusion
 start_at:               mapping         # mapping | markdup | metrics | bqsr | variant_calling | annotation | classification
 stop_at:                classification
+allow_param_change_on_resume: true  # -resume after a parameter change: true = warn and continue; false = stop
 write_manifest:         true
 preflight_references:   true            # check references before any job is submitted
 
@@ -330,9 +331,16 @@ pileup_variants:        ${projectDir}/../references/gatk/small_exac_common_3.hg3
 panel_of_normals:       ${projectDir}/../references/gatk/1000g_pon.hg38.vcf.gz
 # panel_of_normals:     ${projectDir}/../references/capture/S31285117/S31285117_inhouse_pon.vcf.gz   # optional: main_pon.nf (Appendix A, step 4.5)
 orientation_bias:       true
-consensus_backbone:     mutect2   # mutect2: vote on Mutect2 PASS calls; union: vote over all callers (Mutect2 is one vote)
-use_mutect2:            true      # consensus voter (false = union only, no Mutect2 filters)
+somatic_consensus:      true      # true = vote across callers; false = one caller (somatic_caller)
 somatic_caller:         mutect2   # somatic_consensus: false only - mutect2 | strelka2 | muse | varscan
+consensus_backbone:     mutect2   # mutect2: vote on Mutect2 PASS calls; union: vote over all callers (Mutect2 is one vote)
+use_mutect2:            true      # consensus voters; false = that caller does not run (use_mutect2: false needs union)
+use_strelka2:           true
+use_muse:               true      # SNVs only; needs dbsnp
+use_varscan:            true
+consensus_min_snv_callers:   2    # callers needed for an SNV / an indel (>= 2)
+consensus_min_indel_callers: 2
+consensus_filter_mode:  tag       # tag = keep sub-threshold calls labelled LOWCONSENSUS; remove = drop them
 cnvkit_pon:             null      # or ${projectDir}/../references/capture/<KIT>/<KIT>_cnvkit_pon.cnn (same kit)
 msisensor_list:         ${projectDir}/../references/msi/GRCh38.d1.vd1.msisensor.list
 sequenza_gc_wiggle:     ${projectDir}/../references/sequenza/GRCh38.d1.vd1.gc50Base.wig.gz

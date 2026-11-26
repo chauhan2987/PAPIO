@@ -33,6 +33,7 @@ assay    : rna
 analysis : rna_fusion
 start_at : mapping
 stop_at  : classification
+allow_param_change_on_resume : true   # -resume after a parameter change: true = warn and continue; false = stop
 
 # ---- genome, GENCODE v49 and STAR index (built by setup.sh --full) -------------
 rna_use_ctat_reference : false

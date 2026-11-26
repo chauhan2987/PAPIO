@@ -28,7 +28,8 @@ assay              : wes
 analysis           : germline
 start_at           : mapping
 stop_at            : classification
-dedup_mode         : markdup     # demo libraries have no UMIs
+allow_param_change_on_resume : true # -resume after a parameter change: true = warn and continue; false = stop
+dedup_mode         : markdup        # demo libraries have no UMIs
 umi_read_structure : null
 bqsr               : false
 

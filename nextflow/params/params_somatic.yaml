@@ -28,6 +28,7 @@ assay           : wes
 analysis        : somatic
 start_at        : mapping
 stop_at         : classification
+allow_param_change_on_resume : true   # -resume after a parameter change: true = warn and continue; false = stop
 
 # SEQC2 WES libraries carry no UMIs: coordinate duplicate marking, and NO read
 # structure (the markdup path hard-trims the leading non-template bases of
